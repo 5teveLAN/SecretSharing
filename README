@@ -1,0 +1,7 @@
+CLI
+```bash
+cmake -S . -B build
+cmake --build build --target SecretSharingCLI
+```
+
+`./build/SecretSharingCLI input.bmp`
