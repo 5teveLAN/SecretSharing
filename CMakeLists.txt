@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(SecretSharing VERSION 0.1 LANGUAGES CXX)
+# 強制將 MSVC 的執行階段庫從 /MD 改為 /MT
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
