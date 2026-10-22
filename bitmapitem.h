@@ -5,7 +5,12 @@
 #include <QImage>
 
 #include <cstdint>
+#include <functional>
 #include <vector>
+
+// 進度回報函式：done / total（目前以「原圖列數」為單位）
+// 產生機密圖時會在每一列處理完後呼叫一次；傳空的 (ProgressFn{}) 代表不回報。
+using ProgressFn = std::function<void(int done, int total)>;
 
 // BitmapItem
 // 代表一張已讀入的 BMP 圖檔，並在建構時預先計算好
@@ -42,6 +47,14 @@ public:
     // 尚未載入成功（或參數不合法）時回傳空的 vector
     std::vector<QImage> getShares() const;
 
+    // 重新產生機密圖並回報進度（一律重算，不等快取）
+    // 每處理完原圖的一列就呼叫一次 progress(done, total)，
+    //   done  : 已處理的列數 (1 .. total)
+    //   total : 原圖總列數 (m_height)
+    // progress 傳空的 (ProgressFn{}) 代表不回報進度。
+    // 尚未載入成功（或參數不合法）時回傳空的 vector（此時不會呼叫 progress）。
+    std::vector<QImage> regenerateShares(ProgressFn progress = {}) const;
+
     // const function 不改物件的東西
 
 private:
@@ -58,8 +71,9 @@ private:
     //      ratioRow (垂直) x ratioCol (水平) 倍
     //   3. 每個原圖像素各自隨機挑一種可能性 a (0 .. m-1)，
     //      白 → 兩張 share 都取 C[a][0]；黑 → share0 取 C[a][0]、share1 取 C[a][1]
+    // 每處理完一列呼叫一次 progress（可為空）
     // 結果寫入 m_shares (mutable)，故為 const
-    void create2Shares() const;
+    void create2Shares(ProgressFn progress) const;
 
     // --- 成員變數 ---
     QString m_name;         // 檔名

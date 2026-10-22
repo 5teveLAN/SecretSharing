@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 
+#include <QCoreApplication>
 #include <QFileDialog>
 #include <QGraphicsPixmapItem>
 #include <QImage>
@@ -48,16 +49,18 @@ MainWindow::MainWindow(QWidget *parent)
     ui->splitter->setStretchFactor(0, 0);   // 左側不跟著視窗放大
     ui->splitter->setStretchFactor(1, 1);   // 右側吃掉所有多餘空間
 
-    // 兩個清單平均分掉左側剩下的高度，按鈕 / 編輯格維持原本大小
+    // 兩個清單平均分掉左側剩下的高度，按鈕 / 編輯格 / 進度條維持原本大小
     ui->leftLayout->setStretch(0, 0);   // loadButton
     ui->leftLayout->setStretch(1, 1);   // pictureList
     ui->leftLayout->setStretch(2, 0);   // ssConfigWidget
     ui->leftLayout->setStretch(3, 0);   // generateButton
     ui->leftLayout->setStretch(4, 1);   // shareList
+    ui->leftLayout->setStretch(5, 0);   // shareProgress
 
     initList();         // 清單只建立一次（4 個固定版本）
     initShareList();    // Shares 清單只建立一次（kShareCount 列）
     clearShares();      // 一開始沒有圖 → share 清單沒有選取
+    resetProgress();    // 進度條：尚未生成
 }
 
 MainWindow::~MainWindow()
@@ -203,6 +206,8 @@ void MainWindow::selectShareRow()
 }
 
 // ===== 依 col / row 編輯格重新產生機密圖 =====
+// 注意：create2Shares() 是同步計算（逐像素），大圖會讓 UI 暫時凍結，
+//       因此每處理完一列就用 processEvents() 讓進度條重繪。
 void MainWindow::generateShares()
 {
     if (!m_current) {
@@ -212,15 +217,39 @@ void MainWindow::generateShares()
     const int col = ui->ratioColSpin->value();
     const int row = ui->ratioRowSpin->value();
 
-    // 參數變了才會清掉舊的 m_shares 快取 → 下次 getShares() 重算
+    // --- 進度條：以「原圖列數」為單位 ---
+    // 先 disable 按鈕，避免 processEvents() 期間使用者又按一次而重入
+    ui->generateButton->setEnabled(false);
+    ui->shareProgress->setEnabled(true);
+    ui->shareProgress->setRange(0, m_current->getHeight());
+    ui->shareProgress->setValue(0);
+    ui->shareProgress->setFormat(tr("Generating… %p%"));
+    QCoreApplication::processEvents();      // 讓 0% 先顯示出來
+
+    // 參數變了會清掉舊的 m_shares 快取；regenerateShares() 一律重算
     m_current->setSSConfig(kShareCount, 1, row, col);
 
-    if (m_current->getShares().empty()) {
+    const std::vector<QImage> shares = m_current->regenerateShares(
+        [this](int done, int total) {
+            ui->shareProgress->setValue(done);
+            if (done < total) {
+                QCoreApplication::processEvents();   // 邊算邊更新畫面
+            }
+        });
+
+    ui->generateButton->setEnabled(true);
+
+    if (shares.empty()) {
         // col * row 為奇數（或參數不合法）→ 編碼矩陣是空的，產生不出 share
         clearShares();
         m_viewMode = ViewMode::Share;   // 切到 Share 模式，但沒有圖 → 右側空白
         selectRow();
         showCurrentImage();
+
+        ui->shareProgress->setRange(0, 100);
+        ui->shareProgress->setValue(0);
+        ui->shareProgress->setFormat(tr("col × row 必須是偶數"));
+
         statusBar()->showMessage(
             tr("col × row 必須是偶數（目前 %1 × %2）").arg(col).arg(row));
         return;
@@ -228,12 +257,24 @@ void MainWindow::generateShares()
 
     statusBar()->clearMessage();
 
+    // 進度條收尾（最後一列的 callback 已把 value 設到 maximum）
+    ui->shareProgress->setFormat(tr("Done: col %1 × row %2").arg(col).arg(row));
+
     // 生成後直接切到第 0 張 share
     m_viewMode   = ViewMode::Share;
     m_shareIndex = 0;
     selectRow();                // pictureList 清掉選取（Share 不在 pictureList 裡）
     selectShareRow();           // shareList 選到 Share 0
     showCurrentImage();
+}
+
+// ===== 進度條：回到「尚未生成」的狀態 =====
+void MainWindow::resetProgress()
+{
+    ui->shareProgress->setRange(0, 100);
+    ui->shareProgress->setValue(0);
+    ui->shareProgress->setFormat(tr("No shares"));
+    ui->shareProgress->setEnabled(false);
 }
 
 // ===== 沒有可用的機密圖 → 重設 share 的選取狀態 =====
@@ -244,6 +285,8 @@ void MainWindow::clearShares()
     ui->shareList->blockSignals(true);
     ui->shareList->setCurrentRow(-1);
     ui->shareList->blockSignals(false);
+
+    resetProgress();        // 換圖 / 生成失敗 → 進度條回到「尚未生成」
 }
 
 // ===== 依 m_viewMode（+ m_shareIndex）呼叫 getXXX() 並把影像放到右側 =====

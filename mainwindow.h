@@ -66,6 +66,9 @@ private:
     // 沒有可用的機密圖 → 重設 share 的選取狀態
     void clearShares();
 
+    // 進度條回到「尚未生成」的狀態
+    void resetProgress();
+
     // 目前這張圖的各個版本（pictureList 每一列各代表一種；Share 由 shareList 決定第幾張）
     enum class ViewMode { Original, Gray, Binary, Color8, Share };
 

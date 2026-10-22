@@ -5,6 +5,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 // ===== 編碼矩陣 (encoding matrix) =====
@@ -149,8 +150,16 @@ QImage BitmapItem::getColor8() const
 std::vector<QImage> BitmapItem::getShares() const
 {
     if (m_shares.empty()) {
-        create2Shares();
+        create2Shares({});       // 不回報進度
     }
+    return m_shares;
+}
+
+// 重新產生：一律重算（不採用既有快取），並在每列處理完後回報進度
+std::vector<QImage> BitmapItem::regenerateShares(ProgressFn progress) const
+{
+    m_shares.clear();            // 丟掉舊的 → 強制重抽
+    create2Shares(std::move(progress));
     return m_shares;
 }
 
@@ -181,7 +190,7 @@ void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
     m_shares.clear();
 }
 
-void BitmapItem::create2Shares() const
+void BitmapItem::create2Shares(ProgressFn progress) const
 {
     if (m_original.isNull()) {
         return;              // 沒有原圖 → 無法產生，m_shares 保持空
@@ -235,6 +244,11 @@ void BitmapItem::create2Shares() const
                     }
                 }
             }
+        }
+
+        // 這一列處理完 → 回報進度（done 為「已處理完的列數」，從 1 數到 m_height）
+        if (progress) {
+            progress(y + 1, m_height);
         }
     }
 

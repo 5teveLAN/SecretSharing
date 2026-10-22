@@ -115,6 +115,19 @@
         <item>
          <widget class="QListWidget" name="shareList"/>
         </item>
+        <item>
+         <widget class="QProgressBar" name="shareProgress">
+          <property name="minimum">
+           <number>0</number>
+          </property>
+          <property name="maximum">
+           <number>100</number>
+          </property>
+          <property name="value">
+           <number>0</number>
+          </property>
+         </widget>
+        </item>
        </layout>
       </widget>
       <widget class="QGraphicsView" name="imageView">
