@@ -1,3 +1,5 @@
 {
-    "editor.foldLevel": 1
+    "editor.foldLevel": 1,
+    "zenMode.silentNotifications": false,
+    "zenMode.hideStatusBar": true
 }

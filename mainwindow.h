@@ -58,9 +58,10 @@ private:
     QGraphicsScene      *m_scene      = nullptr;
     QGraphicsPixmapItem *m_pixmapItem = nullptr;
 
-    // 紀錄載入圖片的指標
+    // 代表哪一張 bmp 檔
     BitmapItem *m_current = nullptr;
-    // 紀錄目前選取的版本
+    // 代表那張 bmp 檔的 哪一個版本
+    // 兩者結合可以拿到 QImage
     ViewMode    m_viewMode = ViewMode::Original;
 };
 
