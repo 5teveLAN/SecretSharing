@@ -84,3 +84,4 @@ CMakeLists.txt.user*
 /.qtcreator/
 .vscode/settings.json
 .vscode/settings.json
+*.png

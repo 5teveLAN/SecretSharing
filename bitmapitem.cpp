@@ -1,5 +1,6 @@
 #include "bitmapitem.h"
 #include <QFileInfo>
+#include <QRandomGenerator>
 #include <QVector>
 #include <QtGlobal>
 
@@ -143,9 +144,19 @@ QImage BitmapItem::getColor8() const
 
 // ===== 機密分享 =====
 
+// 機密圖：第一次呼叫才建立並快取 (m_shares 是 mutable)
+// setSSConfig() 改參數時會清空 m_shares → 下次呼叫重算
+std::vector<QImage> BitmapItem::getShares() const
+{
+    if (m_shares.empty()) {
+        create2Shares();
+    }
+    return m_shares;
+}
+
 // 設定參數：只有真的改變時才動作，避免無謂地丟掉快取。
 // 因為機密圖是由這組參數算出來的，所以任何一個參數變了，
-// 先前產生的 m_sharings 就必須作廢（清空 → 下次 getSharings() 重算）。
+// 先前產生的 m_shares 就必須作廢（清空 → 下次 getShares() 重算）。
 void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
 {
     // 防呆：n 至少要有 2 張才意義上能「分享」；
@@ -170,11 +181,65 @@ void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
     m_shares.clear();
 }
 
-void BitmapItem::createShares() const
+void BitmapItem::create2Shares() const
 {
     if (m_original.isNull()) {
-        return;              // 沒有原圖 → 無法產生，m_color8 保持 isNull
+        return;              // 沒有原圖 → 無法產生，m_shares 保持空
     }
+
+    // 1. 先建立編碼矩陣 C[a][s][i][j]
+    //    參數不合法（ratioRow / ratioCol < 1 或 m 為奇數）→ 回傳空矩陣
+    const auto C = buildEncodingMatrix(m_ratioRow, m_ratioCol);
+    if (C.empty()) {
+        return;
+    }
+
+    // 可能性數量 P = m! / ((m/2)! (m/2)!) = C(m, m/2)（m 格中挑 m/2 格填黑）
+    //   m=2 → 2 種、m=4 → 6 種；就是編碼矩陣的第一維大小
+    const int P = static_cast<int>(C.size());
+
+    // 2. 先建立「原圖 ratioRow x ratioCol 倍大」的新圖（2 張 share）
+    //    每個原圖像素會擴張成 ratioRow x ratioCol 的一塊
+    std::vector<QImage> shares(
+        2, QImage(m_width * m_ratioCol, m_height * m_ratioRow,
+                  QImage::Format_RGB32));
+
+    const QImage binary = getBinary();       // 二值圖（已快取，沒有就現算）
+    QRandomGenerator *rng = QRandomGenerator::global();
+
+    // 3. 跑原圖每個像素；新圖上以 (ratioRow, ratioCol) 為間隔，填滿對應的一塊
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            // 取二值圖該像素：1 = 黑, 0 = 白
+            const int v = (qRed(binary.pixel(x, y)) <= 127) ? 1 : 0;
+
+            // 這個像素隨機挑一種可能性 a (0 .. P-1)
+            //   P = m! / ((m/2)! (m/2)!)，例如 m=4 → 6 種
+            // 每個像素都重抽 → 相鄰像素樣式不同，不會變成固定棋盤格
+            const int a = rng->bounded(P);
+
+            // 填滿這塊 ratioRow x ratioCol 的格子
+            for (int s = 0; s < 2; ++s) {
+                // 白 (v=0) → 兩張 share 都取 C[a][0]
+                // 黑 (v=1) → share0 取 C[a][0]、share1 取 C[a][1]（反轉）
+                // 只有「黑 + share1」才用反轉那一張，其餘都是 C[a][0]
+                const int t = v ? s : 0;
+
+                for (int i = 0; i < m_ratioRow; ++i) {
+                    for (int j = 0; j < m_ratioCol; ++j) {
+                        const QRgb rgb = C[a][t][i][j]
+                                       ? qRgb(0, 0, 0)       // 1 = 黑
+                                       : qRgb(255, 255, 255); // 0 = 白
+                        shares[s].setPixel(x * m_ratioCol + j,
+                                           y * m_ratioRow + i, rgb);
+                    }
+                }
+            }
+        }
+    }
+
+    // 寫入快取 (m_shares 是 mutable)
+    m_shares = std::move(shares);
 }
 
 void BitmapItem::create8Color() const

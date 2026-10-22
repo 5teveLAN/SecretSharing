@@ -37,9 +37,9 @@ public:
     // 設定產生機密圖的參數；改變設定會清掉先前產生的 m_sharings 快取
     void setSSConfig(int n, int k, int ratioRow, int ratioCol);
 
-    // 一次取得全部機密圖 (共 m_n 張)
-    // m_sharings 為空才建立並快取
-    // 尚未載入成功時回傳空的 vector，並呼叫 createSharigs()
+    // 一次取得全部機密圖 (共 2 張)
+    // m_shares 為空才呼叫 create2Shares() 建立並快取
+    // 尚未載入成功（或參數不合法）時回傳空的 vector
     std::vector<QImage> getShares() const;
 
     // const function 不改物件的東西
@@ -52,9 +52,14 @@ private:
     void createBinary() const;
     void create8Color() const;
 
-    // 產生機密圖：讀 m_binary 與機密分享參數，
-    // 依比例擴張像素後寫入 m_sharings (mutable)，故為 const
-    void createShares() const;
+    // 產生機密圖（目前只支援 2 張 share）：
+    //   1. 先用 buildEncodingMatrix() 建立編碼矩陣 C[a][s][i][j]
+    //   2. 每個原圖像素擴張成 ratioRow x ratioCol 的一塊，整張圖因此放大
+    //      ratioRow (垂直) x ratioCol (水平) 倍
+    //   3. 每個原圖像素各自隨機挑一種可能性 a (0 .. m-1)，
+    //      白 → 兩張 share 都取 C[a][0]；黑 → share0 取 C[a][0]、share1 取 C[a][1]
+    // 結果寫入 m_shares (mutable)，故為 const
+    void create2Shares() const;
 
     // --- 成員變數 ---
     QString m_name;         // 檔名
