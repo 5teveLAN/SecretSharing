@@ -35,8 +35,27 @@ public:
     QImage getBinary()   const;    // 二值圖
     QImage getColor8()   const;    // 8 色圖
 
+    // --- 取得 CMYK 各色版 (channel) ---
+    // 如果 m_xxxChannel 為空，才會去呼叫 createXXXChannel()
+    //
+    // 為什麼叫 Channel 而不是版本？
+    //   gray / binary / color8 是「另一種版本」；
+    //   C / M / Y 是把圖「拆出來」的單一色版（印刷分色用），
+    //   兩者語意不同，所以用 Channel 當後綴，也避免和 m_color8 混淆。
+    //
+    // 來源是 8 色圖 (m_color8)，不是原圖也不是二值圖：
+    //   m_color8 的 R / G / B 各自只有 0 / 255，所以分出來的色版也只有黑 / 白，
+    //   可以直接丟進現有黑白 secret sharing。
+    // 取法（標準 CMYK 分色，不做 GCR / UCR）：
+    //   C = 255 - R、M = 255 - G、Y = 255 - B（R/G/B 取自 m_color8）
+    // 之後要接真正彩色 secret sharing 時，只要改 createXXXChannel() 的取法。
+    QImage getCChannel() const;    // C 青版 (cyan)
+    QImage getMChannel() const;    // M 洋紅版 (magenta)
+    QImage getYChannel() const;    // Y 黃版 (yellow)
+
     // --- 機密分享 (secret sharing) ---
-    // 設定產生機密圖的參數；改變設定會清掉先前產生的 m_sharings 快取
+    // 設定產生機密圖的參數
+    // 改變設定會清掉先前產生的 m_sharings 快取
     void setSSConfig(int n, int k, int ratioRow, int ratioCol);
 
     // 一次取得全部機密圖 (共 2 張)
@@ -61,6 +80,13 @@ private:
     void createBinary() const;
     void create8Color() const;
 
+    // 產生 C / M / Y 色版，直接寫入對應的成員 (m_cChannel / m_mChannel / m_yChannel)
+    // 資料來源是 m_color8（會透過 getColor8() 確保已建立）
+    // 只讀取 m_original / m_color8、寫入 mutable 成員，故為 const
+    void createCChannel() const;
+    void createMChannel() const;
+    void createYChannel() const;
+
     // 產生機密圖（目前只支援 2 張 share）：
     //   1. 先用 buildEncodingMatrix() 建立編碼矩陣 C[a][s][i][j]
     //   2. 每個原圖像素擴張成 ratioRow x ratioCol 的一塊，整張圖因此放大
@@ -83,6 +109,11 @@ private:
     mutable QImage  m_gray;         // 灰階
     mutable QImage  m_binary;       // 二值
     mutable QImage  m_color8;       // 8 色
+
+    // C / M / Y 三個色版（同樣第一次呼叫才建立並快取）
+    mutable QImage  m_cChannel;     // C 青版
+    mutable QImage  m_mChannel;     // M 洋紅版
+    mutable QImage  m_yChannel;     // Y 黃版
 
     // --- 機密分享的參數 ---
     int m_n        = 2;     // 機密圖張數 (secret 數)

@@ -144,6 +144,33 @@ QImage BitmapItem::getColor8() const
     return m_color8;
 }
 
+// C 色版：第一次呼叫才建立並快取 (m_cChannel 是 mutable)
+QImage BitmapItem::getCChannel() const
+{
+    if (m_cChannel.isNull()) {
+        createCChannel();
+    }
+    return m_cChannel;
+}
+
+// M 色版：第一次呼叫才建立並快取
+QImage BitmapItem::getMChannel() const
+{
+    if (m_mChannel.isNull()) {
+        createMChannel();
+    }
+    return m_mChannel;
+}
+
+// Y 色版：第一次呼叫才建立並快取
+QImage BitmapItem::getYChannel() const
+{
+    if (m_yChannel.isNull()) {
+        createYChannel();
+    }
+    return m_yChannel;
+}
+
 // ===== 機密分享 =====
 
 // 機密圖：第一次呼叫才建立並快取 (m_shares 是 mutable)
@@ -315,11 +342,11 @@ void BitmapItem::createGray() const
 void BitmapItem::createBinary() const
 {
     if (m_original.isNull()) {
-        return;              // 沒有原圖 → 無法產生，m_color8 保持 isNull
+        return;              // 沒有原圖 → 無法產生，m_binary 保持 isNull
     }
 
     // 輸出用 Format_RGB32：不用調色盤，每個像素自己填 RGB。
-    // 視覺上只有 8 種顏色，但格式仍是 32-bit 彩色圖。
+    // 視覺上只有黑白兩色，但格式仍是 32-bit 彩色圖。
     QImage out(m_width, m_height, QImage::Format_RGB32);
 
     for (int y = 0; y < m_height; ++y) {
@@ -336,4 +363,92 @@ void BitmapItem::createBinary() const
 
     // 寫入快取 (m_binary 是 mutable)
     m_binary = out;
+}
+
+// ===== C / M / Y 色版 =====
+// 來源是 8 色圖 m_color8（不是 m_original，也不是 m_binary）：
+//   create8Color() 已把每個像素的 R / G / B 各自以 127 為門檻二值化成 0 或 255，
+//   所以每像素只有 8 種顏色，且 m_color8 本身就已經是很單純的色版來源。
+//
+// 取法：標準 CMYK 分色（反相），不做灰成分移除 GCR / UCR：
+//   C = 255 - R、M = 255 - G、Y = 255 - B
+//   因為 m_color8 的 R/G/B 只有 0 / 255，所以 C/M/Y 也只會是 0 / 255，
+//   三張色版都還是「純黑白」，可以直接丟進現有的黑白 secret sharing。
+//   三張都存成「灰階外觀」的 RGB32（R = G = B），
+//   要逐像素判斷黑/白時直接看 qRed() 即可。
+
+void BitmapItem::createCChannel() const
+{
+    if (m_original.isNull()) {
+        return;              // 沒有原圖 → 無法產生，m_cChannel 保持 isNull
+    }
+
+    // 來源是 8 色圖；還沒算過就現算（會寫入 m_color8 快取）
+    const QImage color8 = getColor8();
+
+    // 輸出用 Format_RGB32：不用調色盤，每個像素自己填 RGB。
+    QImage out(m_width, m_height, QImage::Format_RGB32);
+
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            const QRgb rgb8 = color8.pixel(x, y);
+            const int  c = 255 - qRed(rgb8);            // 青版 = R 的反相 (0 或 255)
+
+            out.setPixel(x, y, qRgb(c, c, c));          // 灰階外觀：三通道都填 c
+        }
+    }
+
+    // 寫入快取 (m_cChannel 是 mutable)
+    m_cChannel = out;
+}
+
+void BitmapItem::createMChannel() const
+{
+    if (m_original.isNull()) {
+        return;              // 沒有原圖 → 無法產生，m_mChannel 保持 isNull
+    }
+
+    // 來源是 8 色圖；還沒算過就現算（會寫入 m_color8 快取）
+    const QImage color8 = getColor8();
+
+    // 輸出用 Format_RGB32：不用調色盤，每個像素自己填 RGB。
+    QImage out(m_width, m_height, QImage::Format_RGB32);
+
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            const QRgb rgb8 = color8.pixel(x, y);
+            const int  m = 255 - qGreen(rgb8);          // 洋紅版 = G 的反相 (0 或 255)
+
+            out.setPixel(x, y, qRgb(m, m, m));          // 灰階外觀：三通道都填 m
+        }
+    }
+
+    // 寫入快取 (m_mChannel 是 mutable)
+    m_mChannel = out;
+}
+
+void BitmapItem::createYChannel() const
+{
+    if (m_original.isNull()) {
+        return;              // 沒有原圖 → 無法產生，m_yChannel 保持 isNull
+    }
+
+    // 來源是 8 色圖；還沒算過就現算（會寫入 m_color8 快取）
+    const QImage color8 = getColor8();
+
+    // 輸出用 Format_RGB32：不用調色盤，每個像素自己填 RGB。
+    QImage out(m_width, m_height, QImage::Format_RGB32);
+
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            const QRgb rgb8 = color8.pixel(x, y);
+            // 變數名用 yv：y 已經被迴圈變數（列座標）用掉了
+            const int  yv = 255 - qBlue(rgb8);          // 黃版 = B 的反相 (0 或 255)
+
+            out.setPixel(x, y, qRgb(yv, yv, yv));       // 灰階外觀：三通道都填 yv
+        }
+    }
+
+    // 寫入快取 (m_yChannel 是 mutable)
+    m_yChannel = out;
 }
