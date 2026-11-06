@@ -1,11 +1,12 @@
 #include "bitmapitem.h"
+#include "progress.h"
+
 #include <QFileInfo>
 #include <QRandomGenerator>
 #include <QVector>
 #include <QtGlobal>
 
 #include <algorithm>
-#include <utility>
 #include <vector>
 
 // ===== 編碼矩陣 (encoding matrix) =====
@@ -147,19 +148,15 @@ QImage BitmapItem::getColor8() const
 
 // 機密圖：第一次呼叫才建立並快取 (m_shares 是 mutable)
 // setSSConfig() 改參數時會清空 m_shares → 下次呼叫重算
-std::vector<QImage> BitmapItem::getShares() const
+// forceRegenerate 為 true 時不看快取，一律重新亂數抽樣重算
+std::vector<QImage> BitmapItem::getShares(Progress *progress, bool forceRegenerate) const
 {
-    if (m_shares.empty()) {
-        create2Shares({});       // 不回報進度
+    if (forceRegenerate) {
+        m_shares.clear();        // 丟掉舊的 → 強制重抽
     }
-    return m_shares;
-}
-
-// 重新產生：一律重算（不採用既有快取），並在每列處理完後回報進度
-std::vector<QImage> BitmapItem::regenerateShares(ProgressFn progress) const
-{
-    m_shares.clear();            // 丟掉舊的 → 強制重抽
-    create2Shares(std::move(progress));
+    if (m_shares.empty()) {
+        create2Shares(progress); // progress 可為 nullptr → 不回報進度
+    }
     return m_shares;
 }
 
@@ -190,7 +187,7 @@ void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
     m_shares.clear();
 }
 
-void BitmapItem::create2Shares(ProgressFn progress) const
+void BitmapItem::create2Shares(Progress *progress) const
 {
     if (m_original.isNull()) {
         return;              // 沒有原圖 → 無法產生，m_shares 保持空
@@ -215,6 +212,11 @@ void BitmapItem::create2Shares(ProgressFn progress) const
 
     const QImage binary = getBinary();       // 二值圖（已快取，沒有就現算）
     QRandomGenerator *rng = QRandomGenerator::global();
+
+    // 進度單位 = 原圖列數；total 只在這裡設一次，UI 端不必自己猜
+    if (progress) {
+        progress->setTotal(m_height);
+    }
 
     // 3. 跑原圖每個像素；新圖上以 (ratioRow, ratioCol) 為間隔，填滿對應的一塊
     for (int y = 0; y < m_height; ++y) {
@@ -246,9 +248,9 @@ void BitmapItem::create2Shares(ProgressFn progress) const
             }
         }
 
-        // 這一列處理完 → 回報進度（done 為「已處理完的列數」，從 1 數到 m_height）
+        // 這一列算完了 → 回報進度（done 從 1 數到 m_height）
         if (progress) {
-            progress(y + 1, m_height);
+            progress->report(y + 1);
         }
     }
 

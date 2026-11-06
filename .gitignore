@@ -85,3 +85,4 @@ CMakeLists.txt.user*
 .vscode/settings.json
 .vscode/settings.json
 *.png
+input_small.bmp

@@ -21,6 +21,7 @@ set(PROJECT_SOURCES
         mainwindow.ui
         bitmapitem.cpp
         bitmapitem.h
+        progress.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -58,6 +59,7 @@ add_executable(SecretSharingCLI
     main_cli.cpp
     bitmapitem.cpp
     bitmapitem.h
+    progress.h
 )
 
 target_link_libraries(SecretSharingCLI PRIVATE

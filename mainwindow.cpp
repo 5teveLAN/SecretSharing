@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
+#include "progress.h"
 
 #include <QCoreApplication>
 #include <QFileDialog>
@@ -207,7 +208,8 @@ void MainWindow::selectShareRow()
 
 // ===== 依 col / row 編輯格重新產生機密圖 =====
 // 注意：create2Shares() 是同步計算（逐像素），大圖會讓 UI 暫時凍結，
-//       因此每處理完一列就用 processEvents() 讓進度條重繪。
+//       因此每算完一列就透過 Progress 的 callback 呼叫 processEvents()，
+//       讓進度條有機會重繪（processEvents() 只出現在這裡，不會污染 BitmapItem）。
 void MainWindow::generateShares()
 {
     if (!m_current) {
@@ -221,21 +223,26 @@ void MainWindow::generateShares()
     // 先 disable 按鈕，避免 processEvents() 期間使用者又按一次而重入
     ui->generateButton->setEnabled(false);
     ui->shareProgress->setEnabled(true);
-    ui->shareProgress->setRange(0, m_current->getHeight());
+    ui->shareProgress->setRange(0, 100);
     ui->shareProgress->setValue(0);
     ui->shareProgress->setFormat(tr("Generating… %p%"));
     QCoreApplication::processEvents();      // 讓 0% 先顯示出來
 
-    // 參數變了會清掉舊的 m_shares 快取；regenerateShares() 一律重算
+    // 參數變了會清掉舊的 m_shares 快取；forceRegenerate = true 一律重算
     m_current->setSSConfig(kShareCount, 1, row, col);
 
-    const std::vector<QImage> shares = m_current->regenerateShares(
-        [this](int done, int total) {
-            ui->shareProgress->setValue(done);
-            if (done < total) {
-                QCoreApplication::processEvents();   // 邊算邊更新畫面
-            }
-        });
+    // 進度回報器：GUI 只負責「收到進度要做什麼」，不知道誰在算
+    //   total 由 BitmapItem 透過 setTotal() 給（= 原圖列數）
+    Progress progress([this](int done, int total) {
+        ui->shareProgress->setMaximum(total);
+        ui->shareProgress->setValue(done);
+        if (done < total) {
+            QCoreApplication::processEvents();   // 邊算邊更新畫面
+        }
+    });
+
+    const std::vector<QImage> shares =
+        m_current->getShares(&progress, /*forceRegenerate=*/true);
 
     ui->generateButton->setEnabled(true);
 
@@ -246,6 +253,7 @@ void MainWindow::generateShares()
         selectRow();
         showCurrentImage();
 
+        ui->shareProgress->setEnabled(true);
         ui->shareProgress->setRange(0, 100);
         ui->shareProgress->setValue(0);
         ui->shareProgress->setFormat(tr("col × row 必須是偶數"));
