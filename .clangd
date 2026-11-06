@@ -1,0 +1,13 @@
+CompileFlags:
+  Add: [
+    -isystem, /home/ggd/Qt/6.12.0/gcc_64/include,
+    -isystem, /home/ggd/Qt/6.12.0/gcc_64/include/QtCore,
+    -isystem, /home/ggd/Qt/6.12.0/gcc_64/include/QtGui,
+    -isystem, /home/ggd/Qt/6.12.0/gcc_64/include/QtWidgets,
+    # 👇 1. 讓 Clangd 搜尋當前目錄（解決包含 ./ui_mainwindow.h 的問題）
+    -I, .,
+    # 👇 2. 讓 Clangd 去你的建置目錄找 UI 標頭檔（請根據你實際的 build 資料夾名稱修改）
+    -I, build,
+    -std=c++17
+  ]
+
