@@ -48,7 +48,7 @@ private:
     // 視窗 / 分割線尺寸改變時，讓圖片跟著放大縮小
     void resizeEvent(QResizeEvent *event) override;
 
-    // 建立清單內容：列固定 4 個版本（建構子呼叫一次即可）
+    // 建立清單內容：列數與文字全部來自 BitmapItem::versions()（建構子呼叫一次）
     void initList();
 
     // 建立 Shares 清單：固定 kShareCount 列（建構子呼叫一次即可）
@@ -56,6 +56,10 @@ private:
 
     // 依 m_viewMode 把清單選取切到對應那一列
     void selectRow();
+
+    // 依版本索引找出 pictureList 的列號（找不到回傳 -1）
+    // 列號與版本索引分開處理，不再假設兩者相等
+    int rowOfVersion(int versionIndex) const;
 
     // 依 m_shareIndex 把 Shares 清單選取切到對應那一列
     void selectShareRow();
@@ -70,7 +74,10 @@ private:
     void resetProgress();
 
     // 目前這張圖的各個版本（pictureList 每一列各代表一種；Share 由 shareList 決定第幾張）
-    enum class ViewMode { Original, Gray, Binary, Color8, Share };
+    //
+    // 注意：版本本身不再寫在這裡 —— 有哪幾種版本由 BitmapItem::versions() 決定，
+    //       pictureList 直接照那張表建立，新增版本時這個檔案不用改。
+    enum class ViewMode { Version, Share };
 
     // 目前固定 2 張 share（與 BitmapItem::create2Shares() 一致）
     static constexpr int kShareCount = 2;
@@ -86,7 +93,11 @@ private:
     BitmapItem *m_current = nullptr;
     // 代表那張 bmp 檔的 哪一個版本
     // 兩者結合可以拿到 QImage
-    ViewMode    m_viewMode = ViewMode::Original;
+    ViewMode    m_viewMode = ViewMode::Version;
+
+    // 只有 m_viewMode == Version 時有意義：
+    // 第幾個版本 = BitmapItem::versions() 的索引 = pictureList 的列號
+    int         m_versionIndex = 0;
 
     // 只有 m_viewMode == Share 時有意義：第幾張 share (0 .. kShareCount-1)
     int         m_shareIndex = 0;

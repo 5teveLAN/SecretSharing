@@ -171,6 +171,46 @@ QImage BitmapItem::getYChannel() const
     return m_yChannel;
 }
 
+// ===== 版本目錄 (version catalog) =====
+// 這裡是「畫面上能顯示哪些版本」的唯一來源 (single source of truth)。
+// pictureList 的每一列 = 這個表格的一項，順序也一樣。
+//
+// 新增版本時：
+//   1. 在 bitmapitem.h 宣告 getXXX() const（照下面 getGray() 的寫法：空才建立並快取）
+//   2. 在 bitmapitem.cpp 實作 createXXX() + getXXX()
+//   3. 在這裡加一行 { "顯示名稱", &BitmapItem::getXXX }
+// 不需要動 MainWindow。
+const std::vector<BitmapItemVersion> &BitmapItem::versions()
+{
+    // function static：第一次呼叫才建立，之後共用同一份（內容固定，不需加鎖）
+    static const std::vector<BitmapItemVersion> table = {
+        { "Original",  &BitmapItem::getOriginal  },
+        { "Gray",      &BitmapItem::getGray      },
+        { "Binary",    &BitmapItem::getBinary    },
+        { "8 Color",   &BitmapItem::getColor8    },
+        // C / M / Y 色版（印刷分色用，和上面的「版本」語意不同，但一樣可以顯示）
+        { "C Channel", &BitmapItem::getCChannel  },
+        { "M Channel", &BitmapItem::getMChannel  },
+        { "Y Channel", &BitmapItem::getYChannel  },
+    };
+    return table;
+}
+
+int BitmapItem::versionCount()
+{
+    return static_cast<int>(versions().size());
+}
+
+// 依索引取圖：直接用成員函式指標呼叫，等於「這個版本對應的 getXXX()」
+// 新增版本時這裡不用改（catalog 改了就會自動生效）
+QImage BitmapItem::getImageAt(int index) const
+{
+    if (index < 0 || index >= versionCount()) {
+        return QImage();        // 越界 → 空圖，顯示端會自然變成空白
+    }
+    return (this->*versions()[index].getImage)();
+}
+
 // ===== 機密分享 =====
 
 // 機密圖：第一次呼叫才建立並快取 (m_shares 是 mutable)
@@ -394,7 +434,7 @@ void BitmapItem::createCChannel() const
             const QRgb rgb8 = color8.pixel(x, y);
             const int  c = 255 - qRed(rgb8);            // 青版 = R 的反相 (0 或 255)
 
-            out.setPixel(x, y, qRgb(c, c, c));          // 灰階外觀：三通道都填 c
+            out.setPixel(x, y, qRgb(c, 255, 255));          // 灰階外觀：三通道都填 c
         }
     }
 
@@ -419,7 +459,7 @@ void BitmapItem::createMChannel() const
             const QRgb rgb8 = color8.pixel(x, y);
             const int  m = 255 - qGreen(rgb8);          // 洋紅版 = G 的反相 (0 或 255)
 
-            out.setPixel(x, y, qRgb(m, m, m));          // 灰階外觀：三通道都填 m
+            out.setPixel(x, y, qRgb(255, m, 255));          // 灰階外觀：三通道都填 m
         }
     }
 
@@ -445,7 +485,7 @@ void BitmapItem::createYChannel() const
             // 變數名用 yv：y 已經被迴圈變數（列座標）用掉了
             const int  yv = 255 - qBlue(rgb8);          // 黃版 = B 的反相 (0 或 255)
 
-            out.setPixel(x, y, qRgb(yv, yv, yv));       // 灰階外觀：三通道都填 yv
+            out.setPixel(x, y, qRgb(255, 255, yv));       // 灰階外觀：三通道都填 yv
         }
     }
 

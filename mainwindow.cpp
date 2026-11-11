@@ -18,15 +18,17 @@
 //
 // 設計：
 //   一次只載入「一張」圖片 → m_current。
-//   清單內容固定 4 個版本 (原圖 / 灰階 / 二值 / 8色)，建構子建立一次即可。
-//   點的版本 → 對 m_current 呼叫對應的 getXXX()（首次會計算並快取），
-//   然後把該版本畫到右側。
+//   清單內容 = BitmapItem::versions()（原圖 / 灰階 / 二值 / 8色 / C,M,Y 色版…），
+//   列數與文字都由 BitmapItem 決定，這裡只是照抄，不寫死任何版本名稱。
+//   點某一列 → 用列號當版本索引 → m_current->getImageAt(索引)
+//   （等同呼叫該版本對應的 getXXX()，首次會計算並快取），然後畫到右側。
+//   ** 新增版本只要改 BitmapItem，這個檔案不用動。 **
 //
 //   Shares 清單固定 kShareCount 列 (Share 0 / Share 1)，也只在建構子建立一次。
-//   右側畫面只由 (m_viewMode, m_shareIndex) 決定：
-//     m_viewMode == Share → 取 getShares()[m_shareIndex]
-//                        （m_shareIndex 記錄是第幾張 share）
-//     其他               → 取對應的 getXXX()
+//   右側畫面只由 (m_viewMode, m_versionIndex, m_shareIndex) 決定：
+//     m_viewMode == Share   → 取 getShares()[m_shareIndex]
+//                             （m_shareIndex 記錄是第幾張 share）
+//     m_viewMode == Version → 取 getImageAt(m_versionIndex)
 //   所以 scene 永遠只有一個 pixmap item，不需要為了「疊圖」多加 item。
 //
 //   右側用 QGraphicsView + QGraphicsPixmapItem：
@@ -58,7 +60,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->leftLayout->setStretch(4, 1);   // shareList
     ui->leftLayout->setStretch(5, 0);   // shareProgress
 
-    initList();         // 清單只建立一次（4 個固定版本）
+    initList();         // 清單內容來自 BitmapItem::versions()（版本增減不需要改這裡）
     initShareList();    // Shares 清單只建立一次（kShareCount 列）
     clearShares();      // 一開始沒有圖 → share 清單沒有選取
     resetProgress();    // 進度條：尚未生成
@@ -98,7 +100,8 @@ void MainWindow::on_loadButton_clicked()
     // 新圖還沒有產生 shares（舊圖的 shares 也跟著作廢）→ 重設 share 的狀態
     clearShares();
 
-    m_viewMode = ViewMode::Original;    // 預設先看原圖
+    m_viewMode = ViewMode::Version;     // 預設先看第 0 個版本（versions()[0] = 原圖）
+    m_versionIndex = 0;
     selectRow();                        // 清單選取切到「原圖」那一列
     showCurrentImage();                 // 畫右側
 }
@@ -111,8 +114,9 @@ void MainWindow::on_pictureList_itemSelectionChanged()
         return;
     }
 
-    // 每一列用 Qt::UserRole 偷存它是哪個版本 (ViewMode 的整數值)
-    m_viewMode = static_cast<ViewMode>(row->data(Qt::UserRole).toInt());
+    // 每一列用 Qt::UserRole 偷存它是「第幾個版本」（= BitmapItem::versions() 的索引）
+    m_versionIndex = row->data(Qt::UserRole).toInt();
+    m_viewMode     = ViewMode::Version;
 
     // 兩個清單互斥：選了版本就不要同時選著 share。
     // 清選取會觸發 shareList 的 slot，這裡只是單純清掉，先擋掉訊號。
@@ -152,35 +156,50 @@ void MainWindow::on_generateButton_clicked()
     generateShares();
 }
 
-// ===== 建立清單內容：固定 4 個版本（只做一次） =====
+// ===== 建立清單內容：完全由 BitmapItem::versions() 決定 =====
+// 這裡刻意不寫死任何版本名稱：
+//   BitmapItem 新增一個版本 → 清單自動多一列，這個函式不用改。
+//
+// 注意：setupUi() 已經呼叫過 connectSlotsByName()，slot 早就連上了；
+//       addItem() / clear() 會讓 Qt 自動改選取而觸發 itemSelectionChanged。
+//       建表期間先 blockSignals，避免 slot 在「清單還不完整」時就跑，
+//       把 m_versionIndex 蓋成錯的值（列號與版本索引因此對不上）。
 void MainWindow::initList()
 {
-    const struct {
-        const char *label;
-        ViewMode    mode;
-    } entries[] = {
-        { "Original", ViewMode::Original },
-        { "Gray",     ViewMode::Gray     },
-        { "Binary",   ViewMode::Binary   },
-        { "8 Color",  ViewMode::Color8   },
-    };
+    const std::vector<BitmapItemVersion> &versions = BitmapItem::versions();
 
-    for (int i = 0; i < 4; ++i) {
-        QListWidgetItem *row = new QListWidgetItem(entries[i].label);
-        row->setData(Qt::UserRole, static_cast<int>(entries[i].mode));
+    ui->pictureList->blockSignals(true);
+
+    for (int i = 0; i < static_cast<int>(versions.size()); ++i) {
+        QListWidgetItem *row = new QListWidgetItem(
+            QString::fromUtf8(versions[i].label));       // 標題由 BitmapItem 提供
+        row->setData(Qt::UserRole, i);                   // 偷存「第幾個版本」
         ui->pictureList->addItem(row);
     }
+
+    ui->pictureList->blockSignals(false);
 }
 
-// ===== 依 m_viewMode 把清單選取切到對應那一列 =====
+// ===== 依版本索引找出 pictureList 的列號 =====
+// 不再假設「列號 == 版本索引」：列號是清單位置，版本索引是 UserRole 存的值。
+// 目前 initList() 兩者相同，但這裡用查表方式，之後清單若改順序 / 過濾也不會錯位。
+int MainWindow::rowOfVersion(int versionIndex) const
+{
+    for (int row = 0; row < ui->pictureList->count(); ++row) {
+        if (ui->pictureList->item(row)->data(Qt::UserRole).toInt() == versionIndex) {
+            return row;
+        }
+    }
+    return -1;      // 找不到 → 清掉選取
+}
+
+// ===== 依 m_viewMode / m_versionIndex 把清單選取切到對應那一列 =====
 void MainWindow::selectRow()
 {
     // 切換選取會觸發 itemSelectionChanged；這裡只想要「選取」，
     // 由呼叫端自行決定何時重畫，所以先把訊號擋掉。
     // （m_viewMode 為 Share 時 pictureList 沒有對應的列 → 選取清空）
-    const int row = (m_viewMode == ViewMode::Share)
-                    ? -1
-                    : static_cast<int>(m_viewMode);
+    const int row = (m_viewMode == ViewMode::Share) ? -1 : rowOfVersion(m_versionIndex);
 
     ui->pictureList->blockSignals(true);
     ui->pictureList->setCurrentRow(row);
@@ -190,11 +209,15 @@ void MainWindow::selectRow()
 // ===== 建立 Shares 清單：固定 kShareCount 列（只做一次） =====
 void MainWindow::initShareList()
 {
+    ui->shareList->blockSignals(true);      // 理由同 initList()：建表期間不要觸發 slot
+
     for (int i = 0; i < kShareCount; ++i) {
         QListWidgetItem *row = new QListWidgetItem(QStringLiteral("Share %1").arg(i));
         row->setData(Qt::UserRole, i);      // 偷存「第幾張 share」
         ui->shareList->addItem(row);
     }
+
+    ui->shareList->blockSignals(false);
 }
 
 // ===== 依 m_shareIndex 把 Shares 清單選取切到對應那一列 =====
@@ -308,11 +331,13 @@ void MainWindow::showCurrentImage()
     }
 
     // 依版本「呼叫對應的 getXXX()」取得影像
+    //   版本索引 → BitmapItem::getImageAt() 內部用成員函式指標呼叫對應的 getXXX()，
+    //   所以這裡不再需要為每個版本寫一個 case（新增版本不用改這個函式）。
     QImage image;
     switch (m_viewMode) {
-    case ViewMode::Gray:   image = m_current->getGray();     break;
-    case ViewMode::Binary: image = m_current->getBinary();   break;
-    case ViewMode::Color8: image = m_current->getColor8();   break;
+    case ViewMode::Version:
+        image = m_current->getImageAt(m_versionIndex);
+        break;
     case ViewMode::Share: {
         // 機密圖一次產生全部（已快取），依 m_shareIndex 挑第幾張
         const std::vector<QImage> shares = m_current->getShares();
@@ -322,8 +347,6 @@ void MainWindow::showCurrentImage()
         // 沒有 share（例如 col*row 為奇數）→ image 保持 isNull → 右側空白
         break;
     }
-    case ViewMode::Original:
-    default:               image = m_current->getOriginal(); break;
     }
 
     // 換上圖片（原尺寸），實際顯示大小由 fitImageToView() 決定

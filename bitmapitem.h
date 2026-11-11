@@ -9,6 +9,23 @@
 
 class Progress;     // 進度回報器（見 progress.h）；這裡只用到指標，前置宣告即可
 
+class BitmapItem;
+
+// ===== 版本目錄 (version catalog) =====
+// 一個「版本」= 畫面上可以顯示的一種影像 + 它的名字。
+//   label    : 給 UI 顯示的文字（pictureList 的列文字）
+//   getImage : 取得該版本影像的成員函式指標（呼叫後才計算，會用快取）
+//
+// 為什麼放在 BitmapItem 裡而不是 UI？
+//   這樣「有哪些版本」只有 BitmapItem 知道，
+//   MainWindow 只是把 BitmapItem::versions() 原封不動列到 pictureList，
+//   新增版本只要動 BitmapItem，UI 完全不用改。
+struct BitmapItemVersion
+{
+    const char *label;                          // 顯示名稱，例如 "Gray"
+    QImage (BitmapItem::*getImage)() const;     // 取圖的成員函式，例如 &BitmapItem::getGray
+};
+
 // BitmapItem
 // 代表一張已讀入的 BMP 圖檔，並在建構時預先計算好
 // 灰階 (gray)、二值 (binary)、8 色 (color8) 三種衍生版本。
@@ -52,6 +69,22 @@ public:
     QImage getCChannel() const;    // C 青版 (cyan)
     QImage getMChannel() const;    // M 洋紅版 (magenta)
     QImage getYChannel() const;    // Y 黃版 (yellow)
+
+    // --- 版本目錄：pictureList 的內容由此決定 ---
+    // 所有可顯示的版本，順序就是 UI 清單的順序（[0] = 原圖，預設選這一列）。
+    //
+    // 新增一個版本 = 只做兩件事：
+    //   1. 在上面加一個 getXXX()（第一次呼叫才計算並快取）
+    //   2. 在 bitmapitem.cpp 的 versions() 表格加一行 { "XXX", &BitmapItem::getXXX }
+    // MainWindow / pictureList 不需要任何修改，清單會自動多一列。
+    static const std::vector<BitmapItemVersion> &versions();
+
+    // 版本數量（= versions().size()）方便 UI 直接拿來當迴圈上限
+    static int versionCount();
+
+    // 依版本索引取圖（索引 = 在 versions() 的位置，也就是 pictureList 的列號）
+    // 索引越界 → 回傳空 QImage
+    QImage getImageAt(int index) const;
 
     // --- 機密分享 (secret sharing) ---
     // 設定產生機密圖的參數
