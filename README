@@ -4,4 +4,11 @@ cmake -S . -B build
 cmake --build build --target SecretSharingCLI
 ```
 
+GUI
+```bash
+cd /home/ggd/Code/SecretSharing
+cmake --build build -j4 && cmake --build build/Desktop_Qt_6_12_0_Debug -j4
+```
+
+
 `./build/SecretSharingCLI input.bmp`
