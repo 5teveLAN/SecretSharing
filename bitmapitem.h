@@ -288,7 +288,7 @@ private:
     // --- 機密分享的參數 ---
     int m_n        = 2;     // 機密圖張數 (secret 數)
     int m_k        = 1;     // 容錯張數
-    int m_ratioRow = 1;     // 像素擴張量：垂直倍率 (1x2 → col 拉伸兩倍)
+    int m_ratioRow = 2;     // 像素擴張量：垂直倍率 (2x2 → 水平、垂直都放大兩倍)
     int m_ratioCol = 2;     // 像素擴張量：水平倍率
 
     // mutable 允許在 const 函式裡改

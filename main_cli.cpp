@@ -16,7 +16,7 @@
 //   share2.png       (疊圖：share0 與 share1 疊起來，等同 GUI 的 <prefix>_superimposed)
 //
 // --ss 指定機密分享的像素擴張量，參數順序為 <ratioCol> <ratioRow>（水平，垂直），
-// 預設為 BitmapItem 的預設值 2 x 1（水平 2、垂直 1）。
+// 預設為 BitmapItem 的預設值 2 x 2（水平 2、垂直 2）。
 // --share-mode 指定 share 的來源模式：binary（預設）/ color8 / c / m / y。
 // --dump-matrix 則只印出編碼矩陣 C[a][s][i][j] 的所有可能性（2D 樣式），不讀圖檔。
 //
