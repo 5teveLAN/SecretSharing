@@ -51,8 +51,14 @@ private:
     // 建立清單內容：列數與文字全部來自 BitmapItem::versions()（建構子呼叫一次）
     void initList();
 
-    // 建立 Shares 清單：固定 kShareCount 列（建構子呼叫一次即可）
+    // 建立 / 重建 Shares 清單（依目前選的版本決定文字與列數）
+    //   支援 share 的版本 → kShareCount 列：Binary_share0 / C_share0 …
+    //   不支援 share 的版本（Original / Gray）→ 清單清空
+    // 注意：可重複呼叫（切換版本時會再叫一次）。
     void initShareList();
+
+    // 目前選的版本能不能生成 share（Original / Gray → false）
+    bool currentVersionSupportsShares() const;
 
     // 依 m_viewMode 把清單選取切到對應那一列
     void selectRow();
@@ -98,6 +104,12 @@ private:
     // 只有 m_viewMode == Version 時有意義：
     // 第幾個版本 = BitmapItem::versions() 的索引 = pictureList 的列號
     int         m_versionIndex = 0;
+
+    // 目前選的版本對應的 share 來源模式
+    //   → 決定 shareList 的文字（Binary_share0 / C_share0 …）
+    //   → 決定 generateShares() / showCurrentImage() 要跟 getShares() 要哪一種
+    // 由 m_versionIndex 透過 BitmapItem::shareModeOf() 同步，不讓 UI 自己判斷。
+    ShareMode   m_shareMode = ShareMode::Binary;
 
     // 只有 m_viewMode == Share 時有意義：第幾張 share (0 .. kShareCount-1)
     int         m_shareIndex = 0;

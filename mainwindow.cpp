@@ -24,10 +24,18 @@
 //   （等同呼叫該版本對應的 getXXX()，首次會計算並快取），然後畫到右側。
 //   ** 新增版本只要改 BitmapItem，這個檔案不用動。 **
 //
-//   Shares 清單固定 kShareCount 列 (Share 0 / Share 1)，也只在建構子建立一次。
+//   Shares 清單的文字跟著「目前選的版本」變：
+//     選 Binary    → Binary_share0 / Binary_share1
+//     選 C Channel → C_share0 / C_share1
+//     選 Original / Gray → 清空（這兩個版本沒有對應的 share 演算法）+ Generate 停用
+//   文字一律由 BitmapItem::sharePrefix() 提供，這裡不寫死任何模式名稱；
+//   切換版本時 initShareList() 會重建清單。
+//
+//   Shares 清單列數固定 kShareCount (2)，切版本時重建成對應名稱。
 //   右側畫面只由 (m_viewMode, m_versionIndex, m_shareIndex) 決定：
-//     m_viewMode == Share   → 取 getShares()[m_shareIndex]
-//                             （m_shareIndex 記錄是第幾張 share）
+//     m_viewMode == Share   → 取 getShares(m_shareMode)[m_shareIndex]
+//                             （m_shareMode 由 m_versionIndex 透過
+//                               BitmapItem::shareModeOf() 同步）
 //     m_viewMode == Version → 取 getImageAt(m_versionIndex)
 //   所以 scene 永遠只有一個 pixmap item，不需要為了「疊圖」多加 item。
 //
@@ -61,9 +69,12 @@ MainWindow::MainWindow(QWidget *parent)
     ui->leftLayout->setStretch(5, 0);   // shareProgress
 
     initList();         // 清單內容來自 BitmapItem::versions()（版本增減不需要改這裡）
-    initShareList();    // Shares 清單只建立一次（kShareCount 列）
+    initShareList();    // Shares 清單依「目前已選的版本」命名（Original → 清空）
     clearShares();      // 一開始沒有圖 → share 清單沒有選取
     resetProgress();    // 進度條：尚未生成
+
+    // 一開始選的是 versions()[0]（Original）→ 不支援 share → Generate 先停用
+    ui->generateButton->setEnabled(currentVersionSupportsShares());
 }
 
 MainWindow::~MainWindow()
@@ -102,6 +113,9 @@ void MainWindow::on_loadButton_clicked()
 
     m_viewMode = ViewMode::Version;     // 預設先看第 0 個版本（versions()[0] = 原圖）
     m_versionIndex = 0;
+    m_shareMode = BitmapItem::shareModeOf(m_versionIndex);  // 版本 0 = Original → 不支援 share
+    initShareList();                    // shareList 跟著版本重命名（Original → 清空）
+    ui->generateButton->setEnabled(currentVersionSupportsShares());
     selectRow();                        // 清單選取切到「原圖」那一列
     showCurrentImage();                 // 畫右側
 }
@@ -118,12 +132,26 @@ void MainWindow::on_pictureList_itemSelectionChanged()
     m_versionIndex = row->data(Qt::UserRole).toInt();
     m_viewMode     = ViewMode::Version;
 
-    // 兩個清單互斥：選了版本就不要同時選著 share。
-    // 清選取會觸發 shareList 的 slot，這裡只是單純清掉，先擋掉訊號。
-    ui->shareList->blockSignals(true);
-    ui->shareList->clearSelection();
-    ui->shareList->setCurrentRow(-1);
-    ui->shareList->blockSignals(false);
+    // 版本換了 → share 的來源模式也跟著換（Original / Gray → 不支援）
+    m_shareMode = BitmapItem::shareModeOf(m_versionIndex);
+
+    // shareList 依新版本重新命名：Binary_share0 / C_share0 …
+    // （不支援 share 的版本 → 清單清空，Generate 也一併停用）
+    initShareList();
+    ui->generateButton->setEnabled(currentVersionSupportsShares());
+
+    // 舊版版本生成的 share 已經不對應目前畫面 → 清掉選取與進度條
+    // （clearShares() 內部會擋訊號把 shareList 選取設成 -1，
+    //   所以不需要在這裡另外寫 blockSignals 區塊：兩個清單仍然是互斥的）
+    clearShares();
+
+    if (!currentVersionSupportsShares()) {
+        statusBar()->showMessage(
+            tr("%1 版本不支援生成 share（請選 Binary / 8 Color / C / M / Y）")
+                .arg(QString::fromUtf8(BitmapItem::versions()[m_versionIndex].label)));
+    } else {
+        statusBar()->clearMessage();
+    }
 
     // 依版本呼叫對應的 getXXX()（第一次會計算並快取），再顯示
     showCurrentImage();
@@ -206,18 +234,39 @@ void MainWindow::selectRow()
     ui->pictureList->blockSignals(false);
 }
 
-// ===== 建立 Shares 清單：固定 kShareCount 列（只做一次） =====
+// ===== 建立 / 重建 Shares 清單（依目前選的版本）=====
+// 文字一律由 BitmapItem 提供（sharePrefix()），這裡不寫死任何模式名稱：
+//   Binary    → Binary_share0 / Binary_share1
+//   C Channel → C_share0 / C_share1
+//   Original  → 清空（不支援 share）
+//
+// 可重複呼叫：切換版本時會再叫一次，所以先 clear() 再重建。
+// 建表期間先 blockSignals，理由同 initList()（避免 slot 在清單不完整時就跑）。
 void MainWindow::initShareList()
 {
-    ui->shareList->blockSignals(true);      // 理由同 initList()：建表期間不要觸發 slot
+    ui->shareList->blockSignals(true);
+    ui->shareList->clear();
 
-    for (int i = 0; i < kShareCount; ++i) {
-        QListWidgetItem *row = new QListWidgetItem(QStringLiteral("Share %1").arg(i));
-        row->setData(Qt::UserRole, i);      // 偷存「第幾張 share」
-        ui->shareList->addItem(row);
+    if (currentVersionSupportsShares()) {
+        const QString prefix = BitmapItem::sharePrefix(m_versionIndex);
+
+        for (int i = 0; i < kShareCount; ++i) {
+            QListWidgetItem *row = new QListWidgetItem(
+                QStringLiteral("%1_share%2").arg(prefix).arg(i));
+            row->setData(Qt::UserRole, i);      // 偷存「第幾張 share」
+            ui->shareList->addItem(row);
+        }
     }
+    // 不支援 share → 清單保持空的（Generate 由呼叫端停用）
 
     ui->shareList->blockSignals(false);
+}
+
+// ===== 目前選的版本能不能生成 share =====
+// 沒有載入圖片時一律 false（Generate 應該停用）。
+bool MainWindow::currentVersionSupportsShares() const
+{
+    return m_current && BitmapItem::supportsShares(m_versionIndex);
 }
 
 // ===== 依 m_shareIndex 把 Shares 清單選取切到對應那一列 =====
@@ -238,9 +287,17 @@ void MainWindow::generateShares()
     if (!m_current) {
         return;             // 還沒載入圖片 → 不做事
     }
+    if (!currentVersionSupportsShares()) {
+        // Original / Gray 沒有對應的 share 演算法 → 直接返回（按鈕本來就停用，這裡是保險）
+        return;
+    }
 
     const int col = ui->ratioColSpin->value();
     const int row = ui->ratioRowSpin->value();
+
+    // 目前版本對應的 share 模式（Binary / C / M / Y …）與清單前綴（"C" 等）
+    const ShareMode mode = m_shareMode;
+    const QString   prefix = BitmapItem::sharePrefix(m_versionIndex);
 
     // --- 進度條：以「原圖列數」為單位 ---
     // 先 disable 按鈕，避免 processEvents() 期間使用者又按一次而重入
@@ -248,7 +305,7 @@ void MainWindow::generateShares()
     ui->shareProgress->setEnabled(true);
     ui->shareProgress->setRange(0, 100);
     ui->shareProgress->setValue(0);
-    ui->shareProgress->setFormat(tr("Generating… %p%"));
+    ui->shareProgress->setFormat(tr("Generating %1… %p%").arg(prefix));
     QCoreApplication::processEvents();      // 讓 0% 先顯示出來
 
     // 參數變了會清掉五個模式的快取；forceRegenerate = true 一律重算
@@ -265,9 +322,10 @@ void MainWindow::generateShares()
     });
 
     const std::vector<QImage> shares =
-        m_current->getShares(ShareMode::Binary, &progress, /*forceRegenerate=*/true);
+        m_current->getShares(mode, &progress, /*forceRegenerate=*/true);
 
-    ui->generateButton->setEnabled(true);
+    // 生成結束 → 只有「目前版本仍支援 share」才把按鈕開回來
+    ui->generateButton->setEnabled(currentVersionSupportsShares());
 
     if (shares.empty()) {
         // col * row 為奇數（或參數不合法）→ 編碼矩陣是空的，產生不出 share
@@ -289,13 +347,14 @@ void MainWindow::generateShares()
     statusBar()->clearMessage();
 
     // 進度條收尾（最後一列的 callback 已把 value 設到 maximum）
-    ui->shareProgress->setFormat(tr("Done: col %1 × row %2").arg(col).arg(row));
+    ui->shareProgress->setFormat(tr("Done: %1… col %2 × row %3")
+                                     .arg(prefix).arg(col).arg(row));
 
     // 生成後直接切到第 0 張 share
     m_viewMode   = ViewMode::Share;
     m_shareIndex = 0;
     selectRow();                // pictureList 清掉選取（Share 不在 pictureList 裡）
-    selectShareRow();           // shareList 選到 Share 0
+    selectShareRow();           // shareList 選到第 0 張（Binary_share0 / C_share0 …）
     showCurrentImage();
 }
 
@@ -340,7 +399,9 @@ void MainWindow::showCurrentImage()
         break;
     case ViewMode::Share: {
         // 機密圖一次產生全部（已快取），依 m_shareIndex 挑第幾張
-        const std::vector<QImage> shares = m_current->getShares();
+        // 注意：這裡要用 m_shareMode（= 目前選的版本），不能寫死 Binary，
+        //       否則選了 C Channel 時右側仍會顯示 Binary 的 share。
+        const std::vector<QImage> shares = m_current->getShares(m_shareMode);
         if (m_shareIndex >= 0 && m_shareIndex < static_cast<int>(shares.size())) {
             image = shares[m_shareIndex];
         }

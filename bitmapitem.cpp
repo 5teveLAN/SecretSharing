@@ -178,20 +178,32 @@ QImage BitmapItem::getYChannel() const
 // 新增版本時：
 //   1. 在 bitmapitem.h 宣告 getXXX() const（照下面 getGray() 的寫法：空才建立並快取）
 //   2. 在 bitmapitem.cpp 實作 createXXX() + getXXX()
-//   3. 在這裡加一行 { "顯示名稱", &BitmapItem::getXXX }
+//   3. 在這裡加一行 { "顯示名稱", &BitmapItem::getXXX, "前綴", ShareMode::XXX }
 // 不需要動 MainWindow。
+//
+// 欄位說明：
+//   label        : pictureList 顯示的文字
+//   getImage     : 該版本對應的 getXXX()
+//   sharePrefix  : 這張圖當 share 來源時的名稱前綴（"Binary" → Binary_share0）；
+//                  nullptr = 這個版本不能生成 share
+//   shareMode    : 交給 getShares(mode) 的來源模式（sharePrefix 為 nullptr 時不使用）
+//
+// 為什麼 Original / Gray 是 nullptr？
+//   ShareMode 目前只有 Binary / Color8 / Cyan / Magenta / Yellow 五種來源，
+//   Original / Gray 沒有對應的 share 演算法（也還沒定義「哪裡算黑」），
+//   所以 UI 會把它們的 shareList 清空、停用 Generate，而不是硬算一組錯的 share。
 const std::vector<BitmapItemVersion> &BitmapItem::versions()
 {
     // function static：第一次呼叫才建立，之後共用同一份（內容固定，不需加鎖）
     static const std::vector<BitmapItemVersion> table = {
-        { "Original",  &BitmapItem::getOriginal  },
-        { "Gray",      &BitmapItem::getGray      },
-        { "Binary",    &BitmapItem::getBinary    },
-        { "8 Color",   &BitmapItem::getColor8    },
+        { "Original",  &BitmapItem::getOriginal,  nullptr,   ShareMode::Binary  },
+        { "Gray",      &BitmapItem::getGray,      nullptr,   ShareMode::Binary  },
+        { "Binary",    &BitmapItem::getBinary,    "Binary",  ShareMode::Binary  },
+        { "8 Color",   &BitmapItem::getColor8,    "8Color",  ShareMode::Color8  },
         // C / M / Y 色版（印刷分色用，和上面的「版本」語意不同，但一樣可以顯示）
-        { "C Channel", &BitmapItem::getCChannel  },
-        { "M Channel", &BitmapItem::getMChannel  },
-        { "Y Channel", &BitmapItem::getYChannel  },
+        { "C Channel", &BitmapItem::getCChannel,  "C",       ShareMode::Cyan    },
+        { "M Channel", &BitmapItem::getMChannel,  "M",       ShareMode::Magenta },
+        { "Y Channel", &BitmapItem::getYChannel,  "Y",       ShareMode::Yellow  },
     };
     return table;
 }
@@ -209,6 +221,35 @@ QImage BitmapItem::getImageAt(int index) const
         return QImage();        // 越界 → 空圖，顯示端會自然變成空白
     }
     return (this->*versions()[index].getImage)();
+}
+
+// ===== 版本 → share 的對應 =====
+// 一樣只查 versions() 這張表，UI 不必知道任何模式名稱。
+// 索引越界一律當成「不支援」，讓 UI 走「清空 shareList」那條路。
+
+bool BitmapItem::supportsShares(int versionIndex)
+{
+    if (versionIndex < 0 || versionIndex >= versionCount()) {
+        return false;
+    }
+    return versions()[versionIndex].sharePrefix != nullptr;
+}
+
+ShareMode BitmapItem::shareModeOf(int versionIndex)
+{
+    if (versionIndex < 0 || versionIndex >= versionCount()) {
+        return ShareMode::Binary;       // 越界 → 預設值（呼叫端應先問 supportsShares）
+    }
+    return versions()[versionIndex].shareMode;
+}
+
+QString BitmapItem::sharePrefix(int versionIndex)
+{
+    if (versionIndex < 0 || versionIndex >= versionCount()) {
+        return QString();               // 越界 → 空前綴
+    }
+    const char *prefix = versions()[versionIndex].sharePrefix;
+    return prefix ? QString::fromUtf8(prefix) : QString();
 }
 
 // ===== 機密分享 =====

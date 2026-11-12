@@ -31,18 +31,29 @@ enum class ShareMode
 };
 
 // ===== 版本目錄 (version catalog) =====
-// 一個「版本」= 畫面上可以顯示的一種影像 + 它的名字。
-//   label    : 給 UI 顯示的文字（pictureList 的列文字）
-//   getImage : 取得該版本影像的成員函式指標（呼叫後才計算，會用快取）
+// 一個「版本」= 畫面上可以顯示的一種影像 + 它的名字，
+// 以及它「能不能拿來當 share 的來源」。
+//   label       : 給 UI 顯示的文字（pictureList 的列文字）
+//   getImage    : 取得該版本影像的成員函式指標（呼叫後才計算，會用快取）
+//   sharePrefix : 這個版本當 share 來源時的名稱前綴（例："C" → "C_share0"）
+//                 nullptr = 這個版本不支援生成 share（目前是 Original / Gray）
+//   shareMode   : 對應的 ShareMode（sharePrefix 為 nullptr 時此值不採用）
 //
 // 為什麼放在 BitmapItem 裡而不是 UI？
 //   這樣「有哪些版本」只有 BitmapItem 知道，
 //   MainWindow 只是把 BitmapItem::versions() 原封不動列到 pictureList，
 //   新增版本只要動 BitmapItem，UI 完全不用改。
+//
+// 為什麼 label 和 sharePrefix 要分開存？
+//   label 是給人看的名稱（"C Channel"），sharePrefix 是給 shareList / 檔名用的
+//   短前綴（"C"）。使用者要的是 C_share0 而不是 C_Channel_share0，
+//   所以不能直接從 label 推出來，必須各自寫在表格裡。
 struct BitmapItemVersion
 {
     const char *label;                          // 顯示名稱，例如 "Gray"
     QImage (BitmapItem::*getImage)() const;     // 取圖的成員函式，例如 &BitmapItem::getGray
+    const char *sharePrefix;                    // share 名稱前綴；nullptr = 不支援 share
+    ShareMode   shareMode;                      // share 來源模式，例如 ShareMode::Cyan
 };
 
 // BitmapItem
@@ -105,6 +116,20 @@ public:
     // 依版本索引取圖（索引 = 在 versions() 的位置，也就是 pictureList 的列號）
     // 索引越界 → 回傳空 QImage
     QImage getImageAt(int index) const;
+
+    // --- 版本 → share 的對應（同樣以 versions() 為唯一來源）---
+    // UI 只問這三個問題，不需要知道 Binary / C / M / Y 這些名字：
+    //   1. 這個版本能不能生成 share？      supportsShares()
+    //   2. 要交給 getShares() 哪個 mode？  shareModeOf()
+    //   3. shareList 每一列要叫什麼？      sharePrefix()
+    //
+    // 索引越界（或該版本不支援 share）時的預設回傳：
+    //   supportsShares() → false
+    //   shareModeOf()    → ShareMode::Binary（呼叫前應先用 supportsShares() 確認）
+    //   sharePrefix()    → 空 QString
+    static bool       supportsShares(int versionIndex);
+    static ShareMode  shareModeOf(int versionIndex);
+    static QString    sharePrefix(int versionIndex);
 
     // --- 機密分享 (secret sharing) ---
     // 設定產生機密圖的參數
