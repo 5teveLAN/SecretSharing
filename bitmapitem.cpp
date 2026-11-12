@@ -254,7 +254,7 @@ void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
     m_shares.clear();
 }
 
-void BitmapItem::create2Shares(Progress *progress) const
+void BitmapItem::create2Shares(Progress *progress) const //弄成通用形函式，傳入「模式」參數：Binary, C,M,Y
 {
     if (m_original.isNull()) {
         return;              // 沒有原圖 → 無法產生，m_shares 保持空
@@ -277,7 +277,8 @@ void BitmapItem::create2Shares(Progress *progress) const
         2, QImage(m_width * m_ratioCol, m_height * m_ratioRow,
                   QImage::Format_RGB32));
 
-    const QImage binary = getBinary();       // 二值圖（已快取，沒有就現算）
+    const QImage binary = getBinary(); // 二值圖（已快取，沒有就現算）
+    //根據模式改讀取的img
     QRandomGenerator *rng = QRandomGenerator::global();
 
     // 進度單位 = 原圖列數；total 只在這裡設一次，UI 端不必自己猜
@@ -288,8 +289,15 @@ void BitmapItem::create2Shares(Progress *progress) const
     // 3. 跑原圖每個像素；新圖上以 (ratioRow, ratioCol) 為間隔，填滿對應的一塊
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
-            // 取二值圖該像素：1 = 黑, 0 = 白
+          // 取二值圖該像素：1 = 黑, 0 = 白
+          // 根據模式有不同的標準
+          // binary 照舊
+          // C 取 rgb 的r 大於127 當作黑 
+          // M 取 rgb 的g 大於127 當作黑 
+          // Y 取 rgb 的b 大於127 當作黑
             const int v = (qRed(binary.pixel(x, y)) <= 127) ? 1 : 0;
+
+          // Qrgb 填色（取好名字）; 所謂填色就是 binary: 黑, c=0,255,255 m=255,0,255 y=255,255,0
 
             // 這個像素隨機挑一種可能性 a (0 .. P-1)
             //   P = m! / ((m/2)! (m/2)!)，例如 m=4 → 6 種
@@ -306,7 +314,7 @@ void BitmapItem::create2Shares(Progress *progress) const
                 for (int i = 0; i < m_ratioRow; ++i) {
                     for (int j = 0; j < m_ratioCol; ++j) {
                         const QRgb rgb = C[a][t][i][j]
-                                       ? qRgb(0, 0, 0)       // 1 = 黑
+                                       ? qRgb(0, 0, 0)       // 1 = 黑 //這裡改成填色
                                        : qRgb(255, 255, 255); // 0 = 白
                         shares[s].setPixel(x * m_ratioCol + j,
                                            y * m_ratioRow + i, rgb);
@@ -410,12 +418,15 @@ void BitmapItem::createBinary() const
 //   create8Color() 已把每個像素的 R / G / B 各自以 127 為門檻二值化成 0 或 255，
 //   所以每像素只有 8 種顏色，且 m_color8 本身就已經是很單純的色版來源。
 //
-// 取法：標準 CMYK 分色（反相），不做灰成分移除 GCR / UCR：
-//   C = 255 - R、M = 255 - G、Y = 255 - B
-//   因為 m_color8 的 R/G/B 只有 0 / 255，所以 C/M/Y 也只會是 0 / 255，
-//   三張色版都還是「純黑白」，可以直接丟進現有的黑白 secret sharing。
-//   三張都存成「灰階外觀」的 RGB32（R = G = B），
-//   要逐像素判斷黑/白時直接看 qRed() 即可。
+// 取法：直接取對應通道的值，另外兩個通道固定 255（不做反相）：
+//   C = (R, 255, 255)、M = (255, G, 255)、Y = (255, 255, B)
+//   因為 m_color8 的 R/G/B 只有 0 / 255，所以每張色版也只有兩種顏色：
+//     該通道為 0   → 該色版「有墨」   → (0,255,255) / (255,0,255) / (255,255,0)
+//     該通道為 255 → 該色版「沒有墨」 → 整張白 (255,255,255)
+//   判斷「有墨 / 沒墨」時直接看對應通道是否為 0 即可。
+//
+// 三張色版都是白底 + 單一墨色，可以直接丟進現有的黑白 secret sharing
+// （create2Shares() 再把「有墨」對應成填色、「沒墨」對應成白色）。
 
 void BitmapItem::createCChannel() const
 {
@@ -432,9 +443,9 @@ void BitmapItem::createCChannel() const
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
             const QRgb rgb8 = color8.pixel(x, y);
-            const int  c = 255 - qRed(rgb8);            // 青版 = R 的反相 (0 或 255)
+            const int  c = qRed(rgb8);                 // 青版 = 直接取 R (0 或 255)
 
-            out.setPixel(x, y, qRgb(c, 255, 255));          // 灰階外觀：三通道都填 c
+            out.setPixel(x, y, qRgb(c, 255, 255));      // 青墨 (0,255,255)，沒有墨時全白
         }
     }
 
@@ -457,9 +468,9 @@ void BitmapItem::createMChannel() const
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
             const QRgb rgb8 = color8.pixel(x, y);
-            const int  m = 255 - qGreen(rgb8);          // 洋紅版 = G 的反相 (0 或 255)
+            const int  m = qGreen(rgb8);               // 洋紅版 = 直接取 G (0 或 255)
 
-            out.setPixel(x, y, qRgb(255, m, 255));          // 灰階外觀：三通道都填 m
+            out.setPixel(x, y, qRgb(255, m, 255));      // 洋紅墨 (255,0,255)，沒有墨時全白
         }
     }
 
@@ -483,9 +494,9 @@ void BitmapItem::createYChannel() const
         for (int x = 0; x < m_width; ++x) {
             const QRgb rgb8 = color8.pixel(x, y);
             // 變數名用 yv：y 已經被迴圈變數（列座標）用掉了
-            const int  yv = 255 - qBlue(rgb8);          // 黃版 = B 的反相 (0 或 255)
+            const int  yv = qBlue(rgb8);               // 黃版 = 直接取 B (0 或 255)
 
-            out.setPixel(x, y, qRgb(255, 255, yv));       // 灰階外觀：三通道都填 yv
+            out.setPixel(x, y, qRgb(255, 255, yv));     // 黃墨 (255,255,0)，沒有墨時全白
         }
     }
 

@@ -61,10 +61,11 @@ public:
     //   兩者語意不同，所以用 Channel 當後綴，也避免和 m_color8 混淆。
     //
     // 來源是 8 色圖 (m_color8)，不是原圖也不是二值圖：
-    //   m_color8 的 R / G / B 各自只有 0 / 255，所以分出來的色版也只有黑 / 白，
+    //   m_color8 的 R / G / B 各自只有 0 / 255，所以分出來的色版也只有兩種顏色，
     //   可以直接丟進現有黑白 secret sharing。
-    // 取法（標準 CMYK 分色，不做 GCR / UCR）：
-    //   C = 255 - R、M = 255 - G、Y = 255 - B（R/G/B 取自 m_color8）
+    // 取法（直接取該通道，不做反相）：
+    //   C = (R, 255, 255)、M = (255, G, 255)、Y = (255, 255, B)（R/G/B 取自 m_color8）
+    //   該通道為 0 → 有墨（青/洋紅/黃墨），為 255 → 沒有墨（白色）
     // 之後要接真正彩色 secret sharing 時，只要改 createXXXChannel() 的取法。
     QImage getCChannel() const;    // C 青版 (cyan)
     QImage getMChannel() const;    // M 洋紅版 (magenta)
@@ -115,6 +116,7 @@ private:
 
     // 產生 C / M / Y 色版，直接寫入對應的成員 (m_cChannel / m_mChannel / m_yChannel)
     // 資料來源是 m_color8（會透過 getColor8() 確保已建立）
+    // 取法：C = (R,255,255)、M = (255,G,255)、Y = (255,255,B)，不做反相
     // 只讀取 m_original / m_color8、寫入 mutable 成員，故為 const
     void createCChannel() const;
     void createMChannel() const;
