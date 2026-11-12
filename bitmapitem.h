@@ -14,7 +14,8 @@ class BitmapItem;
 // ===== 機密分享的來源模式 (share mode) =====
 // 決定 createShares() 要「讀哪張圖」來判斷黑/白，以及「填什麼顏色」：
 //   Binary  : 讀 m_binary，黑/白 (0,0,0) / (255,255,255)
-//   Color8  : 讀 m_color8，黑/白 (0,0,0) / (255,255,255)
+//   Color8  : 特別模式，不套「黑/白 mask + 編碼矩陣」，而是把 C / M / Y 三個色版的
+//             share 合併成一張 8 色 share（見 createColor8Shares()）
 //   Cyan    : 讀 m_cChannel，填青墨 (  0,255,255) / 白
 //   Magenta : 讀 m_mChannel，填洋紅 (255,  0,255) / 白
 //   Yellow  : 讀 m_yChannel，填黃墨 (255,255,  0) / 白
@@ -147,6 +148,8 @@ public:
     //                     true  → 丟掉快取、重新亂數抽樣重算（每次結果都不同）
     //
     // 每個模式各自快取：取 Cyan 不會動到 Binary 的快取，反之亦然。
+    // 但 Color8 是由 C/M/Y 三色版合併而來，所以它和 C/M/Y 共用同一份 C/M/Y 快取，
+    // 強制重算 (forceRegenerate = true) 時會連 C/M/Y 一起重抽，避免混到舊位元。
     // 尚未載入成功（或參數不合法）時回傳空的 vector（此時不會呼叫 report）。
     std::vector<QImage> getShares(ShareMode mode = ShareMode::Binary,
                                   Progress *progress = nullptr,
@@ -156,11 +159,17 @@ public:
     // 用途：shareList 的「<prefix>_superimposed」那一列（Binary_superimposed / C_superimposed …）。
     //
     // 計算方法（逐像素，A = share0、B = share1，取同一個座標）：
-    //   (A == inkColor || B == inkColor) ? inkColor : 白 (255,255,255)
-    //   inkColor 依模式而定，和 createShares() 填的墨色一致：
-    //     Binary / Color8 → 黑 (0,0,0)、Cyan → 青 (0,255,255)、
-    //     Magenta → 洋紅 (255,0,255)、Yellow → 黃 (255,255,0)
-    //   → 任一張 share 在該點是「墨」，疊起來就是「墨」；兩張都是白才是白。
+    //   Binary / Cyan / Magenta / Yellow：
+    //     (A == inkColor || B == inkColor) ? inkColor : 白 (255,255,255)
+    //     inkColor 依模式而定，和 createShares() 填的墨色一致：
+    //       Binary → 黑 (0,0,0)、Cyan → 青 (0,255,255)、
+    //       Magenta → 洋紅 (255,0,255)、Yellow → 黃 (255,255,0)
+    //     → 任一張 share 在該點是「墨」，疊起來就是「墨」；兩張都是白才是白。
+    //   Color8：
+    //     不能比 inkColor（share 有 8 種顏色），改成逐通道取 min（墨是 0、白是 255）：
+    //       out = qRgb( min(A.R,B.R), min(A.G,B.G), min(A.B,B.B) )  ← 即「or」
+    //     → 任一張在該通道有墨 → 有墨；還原出 SecretN (a,b,c)
+    //     （見 createColor8Superimposed()）
     //
     // 前提：只有「該模式已經有 share」才算得出來。
     //   沒有 share（還沒按 Generate、或 col × row 為奇數）→ 回傳空 QImage，
@@ -203,24 +212,57 @@ private:
     //
     // 通用形：同一套演算法，只差在「讀哪張圖判斷黑/白」與「填什麼顏色」：
     //   mode = Binary  → 讀 getBinary()，qRed(p) <= 127 當黑，黑填 (0,0,0)
-    //   mode = Color8  → 讀 getColor8()，qRed(p) <= 127 當黑，黑填 (0,0,0)
     //   mode = Cyan    → 讀 getCChannel()，maskCyan()    R == 0 當有墨，填 (0,255,255)
     //   mode = Magenta → 讀 getMChannel()，maskMagenta() G == 0 當有墨，填 (255,0,255)
     //   mode = Yellow  → 讀 getYChannel()，maskYellow()  B == 0 當有墨，填 (255,255,0)
+    //
+    // mode = Color8 是特例：它不用自己算編碼矩陣，也不做「黑/白 mask」，
+    //   而是把 C / M / Y 三個色版的 share 逐像素合併成一張 8 色 share，
+    //   所以在這裡直接轉呼叫 createColor8Shares()（見下方說明）。
     //
     // 每算完一列呼叫一次 progress->report()（progress 可為 nullptr）
     // 結果寫入對應模式的 shares vector (mutable)，故為 const
     void createShares(ShareMode mode, Progress *progress) const;
 
+    // --- 8 Color 專用：C / M / Y 三色版合併 ---
+    // 為什麼要獨立一個子函式？
+    //   8Color 的 share 就是「C share、M share、Y share 三張疊起來」：
+    //     share[s](x,y) = ( C_share[s] 的 R, M_share[s] 的 G, Y_share[s] 的 B )
+    //   每張色版只有「該通道 0 = 有墨」和「255 = 白」兩種值，
+    //   三個通道各自獨立（可以同時有墨），合起來就是 8 色圖
+    //   （2^3 = 8 種 R/G/B 組合）；疊起來（逐通道取 min = 「or」）則
+    //   分別還原 a / b / c，合起來就是 SecretN (a,b,c)。
+    //
+    // 前提（很重要）：C / M / Y 三個模式必須「一次算完、落在同一組座標上」。
+    //   每個色版各自分享自己那個通道的值（C←a、M←b、Y←c），三個通道互不排斥；
+    //   但三張 share 必須一起產生，否則疊圖時 C/M/Y 三份樣式對不起來、
+    //   就還原不出 SecretN。所以三色版由 createCMYKShares() 一次算完。
+    //
+    // 只讀 C/M/Y 的 share、寫入 mutable 的 m_color8_shares，故為 const
+    void createColor8Shares(Progress *progress) const;
+
+    // 8Color 專用疊圖：把 C / M / Y 三張疊圖逐通道取 min 合成 8 色疊圖
+    //   out = qRgb( min(R0,R1), min(G0,G1), min(B0,B1) )   ← 墨是 0、白是 255
+    //   =「or」：任一張 share 在該通道有墨，結果就有墨
+    // 只讀 share、寫入 mutable 的 m_color8_superimposed，故為 const
+    void createColor8Superimposed() const;
+
+    // 一次產生 C / M / Y 三張色版的 share（一起算、落在同一組座標上）
+    //   createShares(Cyan / Magenta / Yellow) 只取其中一份，
+    //   createShares(Color8) 則三份都拿來合併。
+    // 寫入 m_C_shares / m_M_shares / m_Y_shares（mutable），故為 const
+    void createCMYKShares(Progress *progress) const;
+
     // --- 各模式的「遮罩」判斷：把一個像素轉成 1 (有墨/黑) 或 0 (白/沒墨) ---
     // 為什麼要拆成四個小函式，而不是在 createShares() 裡用一個 bool 旗標切換？
-    //   Binary / Color8 是「黑字白底」：黑 = 暗，所以 R <= 127 才算 1。
+    //   Binary 是「黑字白底」：黑 = 暗，所以 R <= 127 才算 1。
     //   C / M / Y 是「彩墨白底」：有墨時該通道是 0、沒墨時是 255，
     //   所以是「該通道 == 0 才算 1」，方向和 Binary 完全相反。
     //   各自一個函式後，createShares() 只要用成員函式指標挑一個，
     //   不用管比較方向，也就不會像 darkIsHigh 那樣寫反。
+    // 注：Color8 不套遮罩（它是由 C/M/Y 合併而來，見 createColor8Shares()）。
     // 只讀傳入的 pixel、不碰成員，故為 const（static 也可，但這裡沿用成員函式指標的形式）
-    int maskBinary(QRgb p) const;      // Binary / Color8：R <= 127 → 1（黑）
+    int maskBinary(QRgb p) const;      // Binary：R <= 127 → 1（黑）
     int maskCyan(QRgb p) const;        // C 色版：R == 0 → 1（有青墨）
     int maskMagenta(QRgb p) const;     // M 色版：G == 0 → 1（有洋紅墨）
     int maskYellow(QRgb p) const;      // Y 色版：B == 0 → 1（有黃墨）

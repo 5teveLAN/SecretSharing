@@ -318,12 +318,37 @@ std::vector<QImage> BitmapItem::getShares(ShareMode mode, Progress *progress,
     std::vector<QImage> &cache = shareCacheOf(m_Binary_shares, m_color8_shares,
                                               m_C_shares, m_M_shares, m_Y_shares, mode);
 
+    // Color8 的 share 是 C / M / Y 三色版合併出來的 → 只要它「其中一邊」要重抽，
+    // 另一邊就必須跟著作廢，否則會把新舊兩組隨機位元混在一起（疊圖就還原不出 SecretN）。
+    //   forceRegenerate = true 且 mode = Color8   → C / M / Y 一起重抽
+    //   forceRegenerate = true 且 mode = C/M/Y    → Color8 一起重抽
+    //   forceRegenerate = true 且 mode = Binary   → 與 Color8 無關，照舊
+    // （Binary 是獨立的一份，不受影響。）
+    const bool regenerateColor8 = forceRegenerate && mode == ShareMode::Color8;
+    const bool regenerateCmy    = forceRegenerate
+                                  && (mode == ShareMode::Cyan
+                                      || mode == ShareMode::Magenta
+                                      || mode == ShareMode::Yellow);
+
     if (forceRegenerate) {
         cache.clear();           // 丟掉該模式的舊快取 → 強制重抽
 
         // share 重抽了 → 同模式的疊圖也不再對應，一起作廢（下次 getSuperimposed() 重算）
         superimposedOf(m_Binary_superimposed, m_color8_superimposed,
                        m_C_superimposed, m_M_superimposed, m_Y_superimposed, mode) = QImage();
+
+        // 上面的「連動清快取」：Color8 ↔ C/M/Y 互為來源，必須一起作廢
+        if (regenerateColor8) {
+            m_C_shares.clear();
+            m_M_shares.clear();
+            m_Y_shares.clear();
+            m_C_superimposed = QImage();
+            m_M_superimposed = QImage();
+            m_Y_superimposed = QImage();
+        } else if (regenerateCmy) {
+            m_color8_shares.clear();
+            m_color8_superimposed = QImage();
+        }
     }
     if (cache.empty()) {
         createShares(mode, progress);   // progress 可為 nullptr → 不回報進度
@@ -404,6 +429,27 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
         return;              // 沒有原圖 → 無法產生，該模式的 shares 保持空
     }
 
+    // ===== 特例：8 Color =====
+    // 8Color 不自己算編碼矩陣，也不做「黑/白 mask」：
+    //   它就是 C / M / Y 三個色版的 share 合併成一張（每通道 0/255 → 8 種顏色）。
+    // 因此直接跳到專用子函式，下面「mask + C[a][s][i][j]」那條路完全不適用。
+    if (mode == ShareMode::Color8) {
+        createColor8Shares(progress);
+        return;
+    }
+
+    // ===== C / M / Y：三色版一起算，落在同一組座標上 =====
+    // 為什麼要一起算？
+    //   Color8 的 share 是由這三張合併而來，三張必須共用同一組編碼矩陣與座標，
+    //   否則 C / M / Y 三份樣式對不起來，疊圖時就還原不出 SecretN。
+    //   交給 createCMYKShares() 一次算完三份，只取這次要的那一份。
+    if (mode == ShareMode::Cyan || mode == ShareMode::Magenta
+        || mode == ShareMode::Yellow) {
+        createCMYKShares(progress);   // 一次算完 C / M / Y 三份
+        return;                       // 三份都已寫進各自的快取，呼叫端自己挑要的那份
+    }
+
+    // ===== Binary：黑字白底，走原本的「遮罩 + 編碼矩陣」流程 =====
     // 1. 先建立編碼矩陣 C[a][s][i][j]
     //    參數不合法（ratioRow / ratioCol < 1 或 m 為奇數）→ 回傳空矩陣
     const auto C = buildEncodingMatrix(m_ratioRow, m_ratioCol);
@@ -421,55 +467,17 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
         2, QImage(m_width * m_ratioCol, m_height * m_ratioRow,
                   QImage::Format_RGB32));
 
-    // 依模式決定「讀哪張圖」、「用哪個函式判斷有墨/黑」、「有墨要填什麼顏色」
+    // Binary：讀 getBinary()，maskBinary() R <= 127 當黑，黑填 (0,0,0)
     //
-    //   mode          source           判斷「1 = 有墨/黑」的函式  填色 (1 要填的顏色)
-    //   Binary        getBinary()      maskBinary()  R <= 127     (0,0,0)     黑
-    //   Color8        getColor8()      maskBinary()  R <= 127     (0,0,0)     黑
-    //   Cyan          getCChannel()    maskCyan()    R == 0       (0,255,255) 青墨
-    //   Magenta       getMChannel()    maskMagenta() G == 0       (255,0,255) 洋紅
-    //   Yellow        getYChannel()    maskYellow()  B == 0       (255,255,0) 黃墨
-    //
-    //   為什麼 Binary 和 C/M/Y 不共用同一套判斷？
-    //     Binary / Color8 是「黑字白底」：黑 = 暗 → R <= 127 當 1。
-    //     C / M / Y  是「彩墨白底」：有墨 → 該通道為 0、其餘通道 255；
-    //                                沒墨 → 整張白 (255,255,255)。
-    //     所以色版是「該通道 == 0 才是有墨」，方向和 Binary 相反
-    //     （C 的有墨是 R=0，不是 R>127），因此各模式用自己的遮罩函式，
-    //     createShares() 不必再管比較方向。
-    QImage (BitmapItem::*getSource)() const   = &BitmapItem::getBinary;
-    int    (BitmapItem::*getMask)(QRgb) const = &BitmapItem::maskBinary;
-    QRgb inkColor = qRgb(0, 0, 0);          // v == 1 要填的顏色（黑 / 青 / 洋紅 / 黃）
-
-    switch (mode) {
-    case ShareMode::Color8:
-        getSource = &BitmapItem::getColor8;                 // 與 Binary 相同判斷
-        getMask   = &BitmapItem::maskBinary;
-        break;
-    case ShareMode::Cyan:
-        getSource = &BitmapItem::getCChannel;
-        getMask   = &BitmapItem::maskCyan;                  // R == 0 → 有墨
-        inkColor  = qRgb(0, 255, 255);                      // 青墨
-        break;
-    case ShareMode::Magenta:
-        getSource = &BitmapItem::getMChannel;
-        getMask   = &BitmapItem::maskMagenta;               // G == 0 → 有墨
-        inkColor  = qRgb(255, 0, 255);                      // 洋紅
-        break;
-    case ShareMode::Yellow:
-        getSource = &BitmapItem::getYChannel;
-        getMask   = &BitmapItem::maskYellow;                // B == 0 → 有墨
-        inkColor  = qRgb(255, 255, 0);                      // 黃墨
-        break;
-    case ShareMode::Binary:
-    default:
-        getSource = &BitmapItem::getBinary;
-        getMask   = &BitmapItem::maskBinary;
-        break;
-    }
-
-    const QImage source = (this->*getSource)();    // 已快取，沒有就現算
-    const QRgb white = qRgb(255, 255, 255);        // v == 0 要填的顏色（白）
+    //   為什麼只有 Binary 走這裡？
+    //     Binary 是「黑字白底」：黑 = 暗 → R <= 127 當 1。
+    //     C / M / Y 是「彩墨白底」：有墨 → 該通道為 0、其餘通道 255，
+    //     方向相反，而且三色版還得共用同一組隨機位元（見 createCMYKShares()），
+    //     所以各自走各自的路徑。
+    //     Color8 更是完全不同：它是 C/M/Y 的合併（見 createColor8Shares()）。
+    const QImage source = getBinary();             // 已快取，沒有就現算
+    const QRgb inkColor = qRgb(0, 0, 0);           // v == 1 要填的顏色（黑）
+    const QRgb white    = qRgb(255, 255, 255);     // v == 0 要填的顏色（白）
 
     QRandomGenerator *rng = QRandomGenerator::global();
 
@@ -481,8 +489,8 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
     // 3. 跑原圖每個像素；新圖上以 (ratioRow, ratioCol) 為間隔，填滿對應的一塊
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
-            // 用該模式自己的遮罩函式判斷「1 = 有墨/黑, 0 = 白/沒墨」
-            const int v = (this->*getMask)(source.pixel(x, y));
+            // 判斷「1 = 黑, 0 = 白」
+            const int v = maskBinary(source.pixel(x, y));
 
             // 這個像素隨機挑一種可能性 a (0 .. P-1)
             //   P = m! / ((m/2)! (m/2)!)，例如 m=4 → 6 種
@@ -514,10 +522,171 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
         }
     }
 
-    // 寫入對應模式的快取 vector（五個模式互不影響，mutable 成員）
-    shareCacheOf(m_Binary_shares, m_color8_shares,
-                 m_C_shares, m_M_shares, m_Y_shares, mode) = std::move(shares);
+    // 寫入 Binary 的快取 vector（mutable 成員）
+    m_Binary_shares = std::move(shares);
 }
+
+// ===== C / M / Y 三色版（一次算完、落在同一組座標上）=====
+// 為什麼三個色版要一起算？
+//   8Color 的 share 就是「C share + M share + Y share」三張合併起來。
+//   三張必須落在同一組座標上、用同一組編碼矩陣，
+//   合併後的 8 色圖在疊圖時（逐通道取 min = 「or」）才能還原 SecretN。
+//   若三張各自跑一次、連矩陣都不同組，疊圖就會對不起來。
+//
+// 每張色版都只填「該通道」，負責 SecretN 的其中一個維度：
+//   C share = (0,255,255) 青墨 / (255,255,255) 白   ← R 通道（a）
+//   M share = (255,0,255) 洋紅 / (255,255,255) 白   ← G 通道（b）
+//   Y share = (255,255,0) 黃墨 / (255,255,255) 白   ← B 通道（c）
+//
+// 也就是說：這是「三個通道各自做一次 (2,2) 黑白分享」，
+//   疊圖取 min 後 R 還原 a、G 還原 b、B 還原 c → 合起來就是 SecretN (a,b,c)。
+// 三個維度互相獨立，所以同一個位置可以三個通道同時有墨（疊圖就是深色）。
+void BitmapItem::createCMYKShares(Progress *progress) const
+{
+    if (m_original.isNull()) {
+        return;              // 沒有原圖 → 三張色版 share 保持空
+    }
+
+    // 1. 建立編碼矩陣：三色版共用同一組 C[a][s][i][j]
+    //    參數不合法（ratioRow / ratioCol < 1 或 m 為奇數）→ 空矩陣
+    const auto C = buildEncodingMatrix(m_ratioRow, m_ratioCol);
+    if (C.empty()) {
+        return;
+    }
+    const int P = static_cast<int>(C.size());
+
+    // 2. 三張色版、各 2 張 share，尺寸都是原圖的 ratio 倍大
+    const QSize size(m_width * m_ratioCol, m_height * m_ratioRow);
+    const QImage blank(size, QImage::Format_RGB32);
+    std::vector<QImage> cShares(2, blank);   // C 色版
+    std::vector<QImage> mShares(2, blank);   // M 色版
+    std::vector<QImage> yShares(2, blank);   // Y 色版
+
+    const QRgb white = qRgb(255, 255, 255);   // 沒墨（三張色版的「白」都一樣）
+    const QRgb cInk  = qRgb(0, 255, 255);     // 青墨
+    const QRgb mInk  = qRgb(255, 0, 255);     // 洋紅
+    const QRgb yInk  = qRgb(255, 255, 0);     // 黃墨
+
+    // 讀哪張色版圖來判斷「這個原圖像素屬於哪個色版」：
+    //   C 色版 = (R,255,255) → maskCyan()    R == 0 有墨
+    //   M 色版 = (255,G,255) → maskMagenta() G == 0 有墨
+    //   Y 色版 = (255,255,B) → maskYellow()  B == 0 有墨
+    const QImage cSource = getCChannel();
+    const QImage mSource = getMChannel();
+    const QImage ySource = getYChannel();
+
+    QRandomGenerator *rng = QRandomGenerator::global();
+
+    if (progress) {
+        progress->setTotal(m_height);
+    }
+
+    // 3. 逐像素：三個色版「各自」做一次 (2,2) 的 0/1 分享
+    //    關鍵：每個色版只負責自己那個通道的值，彼此互不排斥
+    //      C share 的 R ← maskCyan()    （a 這個維度）
+    //      M share 的 G ← maskMagenta() （b 這個維度）
+    //      Y share 的 B ← maskYellow()  （c 這個維度）
+    //    疊圖時逐通道取 min（墨 0、白 255 → 也就是 or），三個通道各自獨立還原，
+    //    合起來就是 SecretN (a,b,c)。
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            // 這個原圖像素在三個色版各自「有沒有墨」：
+            //   C 色版 = (R,255,255) → maskCyan()    R == 0
+            //   M 色版 = (255,G,255) → maskMagenta() G == 0
+            //   Y 色版 = (255,255,B) → maskYellow()  B == 0
+            // 三者互相獨立（可以同時有墨，疊起來就是深色）
+            const int vC = maskCyan(cSource.pixel(x, y));
+            const int vM = maskMagenta(mSource.pixel(x, y));
+            const int vY = maskYellow(ySource.pixel(x, y));
+
+            // 這個像素隨機挑一種可能性 a（0 .. P-1），三色版共用同一組
+            const int a = rng->bounded(P);
+
+            // 填滿這塊 ratioRow x ratioCol 的格子
+            for (int s = 0; s < 2; ++s) {
+                // 規則和 Binary 完全一樣：
+                //   v = 0（白/沒墨）→ 兩張 share 都取 C[a][0]
+                //   v = 1（有墨）   → share0 取 C[a][0]、share1 取 C[a][1]（反轉）
+                const int tC = vC ? s : 0;
+                const int tM = vM ? s : 0;
+                const int tY = vY ? s : 0;
+
+                for (int i = 0; i < m_ratioRow; ++i) {
+                    for (int j = 0; j < m_ratioCol; ++j) {
+                        // 每個色版各自看自己那一組 C[a][t][i][j]：
+                        //   1 = 有墨 → 填該色版的墨色；0 = 白
+                        const QRgb crgb = C[a][tC][i][j] ? cInk : white;   // C：R = 0
+                        const QRgb mrgb = C[a][tM][i][j] ? mInk : white;   // M：G = 0
+                        const QRgb yrgb = C[a][tY][i][j] ? yInk : white;   // Y：B = 0
+
+                        const int px = x * m_ratioCol + j;
+                        const int py = y * m_ratioRow + i;
+                        cShares[s].setPixel(px, py, crgb);
+                        mShares[s].setPixel(px, py, mrgb);
+                        yShares[s].setPixel(px, py, yrgb);
+                    }
+                }
+            }
+        }
+
+        // 這一列算完了 → 回報進度（三色版一起算，所以只回報一次）
+        if (progress) {
+            progress->report(y + 1);
+        }
+    }
+
+    // 4. 三份一起寫回快取（createShares(Cyan/Magenta/Yellow) 只取自己要的那一份，
+    //    createShares(Color8) 三份都拿來合併）
+    m_C_shares = std::move(cShares);
+    m_M_shares = std::move(mShares);
+    m_Y_shares = std::move(yShares);
+}
+
+// ===== 8 Color：C / M / Y 三色版合併 =====
+// 8Color 的 share 不需要自己的編碼矩陣，它就是三張色版 share 逐像素合併：
+//   share[s](px,py) = ( C_share[s] 的 R, M_share[s] 的 G, Y_share[s] 的 B )
+// 也就是 (a, b, c) 三個通道各自拿一張色版的結果，合起來就是 8 色圖。
+//
+// 疊圖時逐通道取 min（墨 0、白 255 → 「or」），三個通道各自還原出 a / b / c，
+// 合起來就回到 SecretN (a,b,c)。
+void BitmapItem::createColor8Shares(Progress *progress) const
+{
+    if (m_original.isNull()) {
+        return;              // 沒有原圖 → m_color8_shares 保持空
+    }
+
+    // 1. 確保 C / M / Y 三色版的 share 都已存在
+    //    （沒有就現算；三張共用同一組隨機位元，見 createCMYKShares()）
+    const std::vector<QImage> cShares = getShares(ShareMode::Cyan, progress);
+    const std::vector<QImage> mShares = getShares(ShareMode::Magenta, progress);
+    const std::vector<QImage> yShares = getShares(ShareMode::Yellow, progress);
+    if (cShares.size() < 2 || mShares.size() < 2 || yShares.size() < 2) {
+        return;              // 參數不合法（例如 col × row 為奇數）→ 三色版是空的
+    }
+
+    // 2. 逐像素合併：C 取 R、M 取 G、Y 取 B（三張尺寸相同，以 C 為準）
+    std::vector<QImage> shares(
+        2, QImage(cShares[0].width(), cShares[0].height(), QImage::Format_RGB32));
+
+    for (int s = 0; s < 2; ++s) {
+        const QImage &cs = cShares[s];
+        const QImage &ms = mShares[s];
+        const QImage &ys = yShares[s];
+
+        for (int py = 0; py < cs.height(); ++py) {
+            for (int px = 0; px < cs.width(); ++px) {
+                shares[s].setPixel(px, py,
+                                   qRgb(qRed(cs.pixel(px, py)),     // C 色版的 R
+                                        qGreen(ms.pixel(px, py)),   // M 色版的 G
+                                        qBlue(ys.pixel(px, py))));  // Y 色版的 B
+            }
+        }
+    }
+
+    // 3. 寫回 8Color 的快取（mutable 成員）
+    m_color8_shares = std::move(shares);
+}
+
 
 // ===== 疊圖 (superimposed) =====
 // 把同一個模式的兩張 share 疊起來，得到一張「疊合後」的影像
@@ -543,6 +712,13 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
 //   所以算一次存起來（mutable），切換清單選取時不必重算。
 void BitmapItem::createSuperimposed(ShareMode mode) const
 {
+    // 8 Color 是特例：share 有 8 種顏色，不能比對 inkColor，
+    // 要改成「三個通道分別取 min（墨 0、白 255，即 or）」→ 見 createColor8Superimposed()
+    if (mode == ShareMode::Color8) {
+        createColor8Superimposed();
+        return;
+    }
+
     // 取得該模式的 share（已快取；沒有 share 時是空的，不會觸發生成）
     const std::vector<QImage> shares = getShares(mode);
     if (shares.size() < 2 || shares[0].isNull() || shares[1].isNull()) {
@@ -553,10 +729,11 @@ void BitmapItem::createSuperimposed(ShareMode mode) const
     const QImage &s1 = shares[1];      // B：第 2 張 share
 
     // 依模式決定「什麼顏色算有墨」，與 createShares() 填的 inkColor 完全一致：
-    //   Binary / Color8 → 黑 (0,0,0)
-    //   Cyan            → 青墨 (0,255,255)
-    //   Magenta         → 洋紅 (255,0,255)
-    //   Yellow          → 黃墨 (255,255,0)
+    //   Binary → 黑 (0,0,0)
+    //   Cyan   → 青墨 (0,255,255)
+    //   Magenta→ 洋紅 (255,0,255)
+    //   Yellow → 黃墨 (255,255,0)
+    // （Color8 已在上面轉走）
     QRgb inkColor = qRgb(0, 0, 0);
     switch (mode) {
     case ShareMode::Cyan:    inkColor = qRgb(0, 255, 255);    break;
@@ -586,6 +763,49 @@ void BitmapItem::createSuperimposed(ShareMode mode) const
     // 寫入對應模式的疊圖快取（五個模式互不影響，mutable 成員）
     superimposedOf(m_Binary_superimposed, m_color8_superimposed,
                    m_C_superimposed, m_M_superimposed, m_Y_superimposed, mode) = out;
+}
+
+// ===== 8 Color 的疊圖 =====
+// 8Color 的 share 每個通道各自代表一個色版（C 看 R、M 看 G、Y 看 B），
+// 所以疊圖不能比對「整顆像素的顏色」，要逐通道取 min：
+//
+//   墨 = 0、白 = 255 → min 就等於「or」
+//   out = qRgb( min(A.R, B.R), min(A.G, B.G), min(A.B, B.B) )
+//
+// 為什麼這樣會還原出 SecretN？
+//   同一塊格子裡，某個位置一定是「一張 share 有墨、另一張是白」，
+//   所以每個位置疊完只會剩下「某一個色版」（例如 (0,255,255) 青）。
+//   整塊 ratioRow × ratioCol 疊完 → 遠看就是 SecretN 的 (a,b,c)。
+void BitmapItem::createColor8Superimposed() const
+{
+    // 取得 8Color 的 share（已快取；沒有 share 時是空的，不會觸發生成）
+    const std::vector<QImage> shares = getShares(ShareMode::Color8);
+    if (shares.size() < 2 || shares[0].isNull() || shares[1].isNull()) {
+        return;              // 沒有兩張 share → 疊不起來，快取保持 isNull
+    }
+
+    const QImage &s0 = shares[0];      // A：第 1 張 share
+    const QImage &s1 = shares[1];      // B：第 2 張 share
+
+    // 兩張 share 尺寸相同（同一次 createColor8Shares() 產生），以第 1 張為準
+    QImage out(s0.width(), s0.height(), QImage::Format_RGB32);
+
+    for (int y = 0; y < s0.height(); ++y) {
+        for (int x = 0; x < s0.width(); ++x) {
+            const QRgb a = s0.pixel(x, y);
+            const QRgb b = s1.pixel(x, y);
+
+            // 以 RGB 數值視角（光 255、墨 0）：逐通道取 min，等同於邏輯「AND」（兩者皆透光才顯色）
+            const int r = std::min(qRed(a),   qRed(b));
+            const int g = std::min(qGreen(a), qGreen(b));
+            const int bl = std::min(qBlue(a), qBlue(b));
+
+            out.setPixel(x, y, qRgb(r, g, bl));
+        }
+    }
+
+    // 寫入 8Color 的疊圖快取（mutable 成員）
+    m_color8_superimposed = out;
 }
 
 void BitmapItem::create8Color() const
