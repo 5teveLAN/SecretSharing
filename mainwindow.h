@@ -52,7 +52,8 @@ private:
     void initList();
 
     // 建立 / 重建 Shares 清單（依目前選的版本決定文字與列數）
-    //   支援 share 的版本 → kShareCount 列：Binary_share0 / C_share0 …
+    //   支援 share 的版本 → kShareRowCount 列：
+    //       Binary_share0 / Binary_share1 / Binary_superimposed（C_share0 … 同理）
     //   不支援 share 的版本（Original / Gray）→ 清單清空
     // 注意：可重複呼叫（切換版本時會再叫一次）。
     void initShareList();
@@ -88,6 +89,13 @@ private:
     // 目前固定 2 張 share（與 BitmapItem::createShares() 一致）
     static constexpr int kShareCount = 2;
 
+    // 疊圖那一列在 shareList 的索引 = 兩張 share 之後（= shareList 的第 3 列）
+    // 它的 UserRole 也存這個值，所以 m_shareIndex 用它就能分辨「要顯示疊圖」
+    static constexpr int kSuperimposedIndex = kShareCount;
+
+    // shareList 的總列數：<prefix>_share0、<prefix>_share1、<prefix>_superimposed
+    static constexpr int kShareRowCount = kShareCount + 1;
+
     Ui::MainWindow *ui;
 
     // 右側用 QGraphicsView + QGraphicsPixmapItem 顯示圖片：
@@ -111,7 +119,8 @@ private:
     // 由 m_versionIndex 透過 BitmapItem::shareModeOf() 同步，不讓 UI 自己判斷。
     ShareMode   m_shareMode = ShareMode::Binary;
 
-    // 只有 m_viewMode == Share 時有意義：第幾張 share (0 .. kShareCount-1)
+    // 只有 m_viewMode == Share 時有意義：
+    //   第幾張 share (0 .. kShareCount-1)，或 kSuperimposedIndex（= 疊圖那一列）
     int         m_shareIndex = 0;
 };
 

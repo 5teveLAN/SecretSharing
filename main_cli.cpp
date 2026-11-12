@@ -7,12 +7,13 @@
 //   ./SecretSharingCLI input.bmp --ss <ratioCol> <ratioRow>
 //   ./SecretSharingCLI --dump-matrix <ratioCol> <ratioRow>
 //
-// 會在「輸入檔所在目錄」產生五個 PNG：
-//   gray.png    (灰階)
-//   binary.png  (二值)
-//   color8.png  (8 色)
-//   share0.png  (第 1 張機密分享)
-//   share1.png  (第 2 張機密分享)
+// 會在「輸入檔所在目錄」產生六個 PNG：
+//   gray.png         (灰階)
+//   binary.png       (二值)
+//   color8.png       (8 色)
+//   share0.png       (第 1 張機密分享)
+//   share1.png       (第 2 張機密分享)
+//   share2.png       (疊圖：share0 與 share1 疊起來，等同 GUI 的 <prefix>_superimposed)
 //
 // --ss 指定機密分享的像素擴張量，參數順序為 <ratioCol> <ratioRow>（水平，垂直），
 // 預設為 BitmapItem 的預設值 2 x 1（水平 2、垂直 1）。
@@ -202,6 +203,10 @@ int main(int argc, char *argv[])
         { "color8.png", item.getColor8() },
         { "share0.png", shares.size() > 0 ? shares[0] : QImage() },
         { "share1.png", shares.size() > 1 ? shares[1] : QImage() },
+        // share2.png = 疊圖（GUI 的 <prefix>_superimposed）：
+        //   (share0 == inkColor || share1 == inkColor) ? inkColor : 白
+        // 用 getSuperimposed() 算，和 GUI 走同一條路徑，方便對照
+        { "share2.png", item.getSuperimposed(shareMode) },
     };
 
     bool ok = true;

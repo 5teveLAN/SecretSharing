@@ -152,6 +152,24 @@ public:
                                   Progress *progress = nullptr,
                                   bool forceRegenerate = false) const;
 
+    // --- 疊圖 (superimposed)：把同一個模式的兩張 share 疊起來 ---
+    // 用途：shareList 的「<prefix>_superimposed」那一列（Binary_superimposed / C_superimposed …）。
+    //
+    // 計算方法（逐像素，A = share0、B = share1，取同一個座標）：
+    //   (A == inkColor || B == inkColor) ? inkColor : 白 (255,255,255)
+    //   inkColor 依模式而定，和 createShares() 填的墨色一致：
+    //     Binary / Color8 → 黑 (0,0,0)、Cyan → 青 (0,255,255)、
+    //     Magenta → 洋紅 (255,0,255)、Yellow → 黃 (255,255,0)
+    //   → 任一張 share 在該點是「墨」，疊起來就是「墨」；兩張都是白才是白。
+    //
+    // 前提：只有「該模式已經有 share」才算得出來。
+    //   沒有 share（還沒按 Generate、或 col × row 為奇數）→ 回傳空 QImage，
+    //   顯示端自然變成空白。本函式不會自己觸發 createShares()。
+    //
+    // 結果存在 m_X_superimposed（mutable，第一次算完就快取）；
+    // setSSConfig() 改參數、getShares(forceRegenerate = true) 重抽時都會一併清掉。
+    QImage getSuperimposed(ShareMode mode = ShareMode::Binary) const;
+
     // const function 不改物件的東西
 
 private:
@@ -169,6 +187,12 @@ private:
     void createCChannel() const;
     void createMChannel() const;
     void createYChannel() const;
+
+    // 產生疊圖：把該模式的兩張 share 逐像素疊起來，寫入 m_X_superimposed
+    // 只看 getShares(mode) 的結果，不會自己生成 share
+    //   若 share 不存在 / 少於 2 張 → 不做事，m_X_superimposed 保持 isNull
+    // 只讀取 share、寫入 mutable 成員，故為 const
+    void createSuperimposed(ShareMode mode) const;
 
     // 產生機密圖（目前只支援 2 張 share）：
     //   1. 先用 buildEncodingMatrix() 建立編碼矩陣 C[a][s][i][j]
@@ -236,6 +260,15 @@ private:
     mutable std::vector<QImage> m_C_shares;
     mutable std::vector<QImage> m_M_shares;
     mutable std::vector<QImage> m_Y_shares;
+
+    // 每個模式的「疊圖」快取（兩張 share 疊起來的結果），同樣第一次呼叫才計算
+    // 命名跟在 share 快取後面，一看就知道是哪個模式的疊圖
+    // 生命週期和同模式的 share 綁在一起：share 被清掉時這裡也要清（見 setSSConfig()）
+    mutable QImage m_Binary_superimposed;
+    mutable QImage m_color8_superimposed;
+    mutable QImage m_C_superimposed;
+    mutable QImage m_M_superimposed;
+    mutable QImage m_Y_superimposed;
 };
 
 // ===== 編碼矩陣 (encoding matrix) =====

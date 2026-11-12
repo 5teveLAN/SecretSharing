@@ -171,6 +171,42 @@ QImage BitmapItem::getYChannel() const
     return m_yChannel;
 }
 
+// 依模式取出對應的「疊圖」快取（五個模式互不影響）
+// 寫法和 shareCacheOf() 一樣：把「挑哪一份」的 switch 集中在這裡。
+// 注：這些成員都是 mutable，所以在 const 函式內取得可寫入引用是合法的。
+// 放在檔案內（static）只是輔助函式，不需要動到 BitmapItem 的介面。
+static QImage &superimposedOf(QImage &bin,
+                              QImage &c8,
+                              QImage &c,
+                              QImage &m,
+                              QImage &y,
+                              ShareMode mode)
+{
+    switch (mode) {
+    case ShareMode::Color8:  return c8;
+    case ShareMode::Cyan:    return c;
+    case ShareMode::Magenta: return m;
+    case ShareMode::Yellow:  return y;
+    case ShareMode::Binary:
+    default:                 return bin;
+    }
+}
+
+// 疊圖：第一次呼叫才建立並快取 (m_X_superimposed 是 mutable)
+// 只拿「已經有的 share」來疊，不會自己去生成 share（沒 share 就回傳空圖）
+QImage BitmapItem::getSuperimposed(ShareMode mode) const
+{
+    // 依模式挑出對應的疊圖快取；空的話才去算
+    // （mutable 成員，所以在 const 函式裡取得可寫入引用是合法的）
+    QImage &cache = superimposedOf(m_Binary_superimposed, m_color8_superimposed,
+                                   m_C_superimposed, m_M_superimposed,
+                                   m_Y_superimposed, mode);
+    if (cache.isNull()) {
+        createSuperimposed(mode);
+    }
+    return cache;
+}
+
 // ===== 版本目錄 (version catalog) =====
 // 這裡是「畫面上能顯示哪些版本」的唯一來源 (single source of truth)。
 // pictureList 的每一列 = 這個表格的一項，順序也一樣。
@@ -284,6 +320,10 @@ std::vector<QImage> BitmapItem::getShares(ShareMode mode, Progress *progress,
 
     if (forceRegenerate) {
         cache.clear();           // 丟掉該模式的舊快取 → 強制重抽
+
+        // share 重抽了 → 同模式的疊圖也不再對應，一起作廢（下次 getSuperimposed() 重算）
+        superimposedOf(m_Binary_superimposed, m_color8_superimposed,
+                       m_C_superimposed, m_M_superimposed, m_Y_superimposed, mode) = QImage();
     }
     if (cache.empty()) {
         createShares(mode, progress);   // progress 可為 nullptr → 不回報進度
@@ -320,6 +360,13 @@ void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
     m_C_shares.clear();
     m_M_shares.clear();
     m_Y_shares.clear();
+
+    // 疊圖是由 share 疊出來的 → share 作廢，疊圖也一起作廢
+    m_Binary_superimposed = QImage();
+    m_color8_superimposed = QImage();
+    m_C_superimposed      = QImage();
+    m_M_superimposed      = QImage();
+    m_Y_superimposed      = QImage();
 }
 
 // ===== 各模式的遮罩判斷（1 = 有墨/黑，0 = 白/沒墨）=====
@@ -470,6 +517,75 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
     // 寫入對應模式的快取 vector（五個模式互不影響，mutable 成員）
     shareCacheOf(m_Binary_shares, m_color8_shares,
                  m_C_shares, m_M_shares, m_Y_shares, mode) = std::move(shares);
+}
+
+// ===== 疊圖 (superimposed) =====
+// 把同一個模式的兩張 share 疊起來，得到一張「疊合後」的影像
+// （shareList 的 <prefix>_superimposed 那一列）：
+//
+//   A = share0 在該點的顏色、B = share1 在該點的顏色
+//   (A == inkColor || B == inkColor) ? inkColor : 白 (255,255,255)
+//
+//   也就是「任一張有墨 → 有墨；兩張都白 → 白」。
+//   注意 A、B 不是用遮罩函式判斷，而是直接比對顏色：
+//   createShares() 只會填 inkColor(墨) 和 white(白) 兩種顏色，
+//   所以「等於 inkColor」就等於「這張 share 在該點有墨」，
+//   不需要、也不應該再套一次 maskBinary() 那類門檻判斷。
+//
+// 前提：只疊「已經存在的 share」
+//   會用 getShares(mode) 取得 share，但本函式不會讓它重新生成：
+//     - 還沒按 Generate       → share 是空的 → 回傳空圖（顯示端空白）
+//     - col × row 為奇數     → 編碼矩陣是空的 → share 是空的 → 回傳空圖
+//   這種情況下 m_X_superimposed 保持 isNull，下次呼叫會再試一次。
+//
+// 為什麼要開一個快取成員？
+//   疊圖是「兩張 share 逐像素比較」算出來的，share 不變答案就不變，
+//   所以算一次存起來（mutable），切換清單選取時不必重算。
+void BitmapItem::createSuperimposed(ShareMode mode) const
+{
+    // 取得該模式的 share（已快取；沒有 share 時是空的，不會觸發生成）
+    const std::vector<QImage> shares = getShares(mode);
+    if (shares.size() < 2 || shares[0].isNull() || shares[1].isNull()) {
+        return;              // 沒有兩張 share → 疊不起來，快取保持 isNull
+    }
+
+    const QImage &s0 = shares[0];      // A：第 1 張 share
+    const QImage &s1 = shares[1];      // B：第 2 張 share
+
+    // 依模式決定「什麼顏色算有墨」，與 createShares() 填的 inkColor 完全一致：
+    //   Binary / Color8 → 黑 (0,0,0)
+    //   Cyan            → 青墨 (0,255,255)
+    //   Magenta         → 洋紅 (255,0,255)
+    //   Yellow          → 黃墨 (255,255,0)
+    QRgb inkColor = qRgb(0, 0, 0);
+    switch (mode) {
+    case ShareMode::Cyan:    inkColor = qRgb(0, 255, 255);    break;
+    case ShareMode::Magenta: inkColor = qRgb(255, 0, 255);    break;
+    case ShareMode::Yellow:  inkColor = qRgb(255, 255, 0);    break;
+    case ShareMode::Color8:
+    case ShareMode::Binary:
+    default:                 inkColor = qRgb(0, 0, 0);        break;
+    }
+
+    const QRgb white = qRgb(255, 255, 255);   // 兩張都沒有墨 → 白
+
+    // 兩張 share 尺寸相同（同一次 createShares() 產生），以第 1 張為準
+    QImage out(s0.width(), s0.height(), QImage::Format_RGB32);
+
+    for (int y = 0; y < s0.height(); ++y) {
+        for (int x = 0; x < s0.width(); ++x) {
+            const QRgb a = s0.pixel(x, y);      // A
+            const QRgb b = s1.pixel(x, y);      // B
+
+            // (A == inkColor || B == inkColor) ? inkColor : 白
+            const bool hasInk = (a == inkColor) || (b == inkColor);
+            out.setPixel(x, y, hasInk ? inkColor : white);
+        }
+    }
+
+    // 寫入對應模式的疊圖快取（五個模式互不影響，mutable 成員）
+    superimposedOf(m_Binary_superimposed, m_color8_superimposed,
+                   m_C_superimposed, m_M_superimposed, m_Y_superimposed, mode) = out;
 }
 
 void BitmapItem::create8Color() const

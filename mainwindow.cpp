@@ -25,15 +25,20 @@
 //   ** 新增版本只要改 BitmapItem，這個檔案不用動。 **
 //
 //   Shares 清單的文字跟著「目前選的版本」變：
-//     選 Binary    → Binary_share0 / Binary_share1
-//     選 C Channel → C_share0 / C_share1
+//     選 Binary    → Binary_share0 / Binary_share1 / Binary_superimposed
+//     選 C Channel → C_share0 / C_share1 / C_superimposed
 //     選 Original / Gray → 清空（這兩個版本沒有對應的 share 演算法）+ Generate 停用
 //   文字一律由 BitmapItem::sharePrefix() 提供，這裡不寫死任何模式名稱；
 //   切換版本時 initShareList() 會重建清單。
 //
-//   Shares 清單列數固定 kShareCount (2)，切版本時重建成對應名稱。
+//   Shares 清單列數固定 kShareRowCount (2 張 share + 1 張疊圖)，切版本時重建成對應名稱。
+//   最後一列 <prefix>_superimposed = 兩張 share 疊起來的圖
+//   （BitmapItem::getSuperimposed()：任一張有墨 → 墨，兩張都白 → 白），
+//   所以要按過 Generate 才有東西可疊，否則該列是空白。
+//
 //   右側畫面只由 (m_viewMode, m_versionIndex, m_shareIndex) 決定：
-//     m_viewMode == Share   → 取 getShares(m_shareMode)[m_shareIndex]
+//     m_viewMode == Share   → m_shareIndex == kSuperimposedIndex 時取 getSuperimposed(m_shareMode)，
+//                             否則取 getShares(m_shareMode)[m_shareIndex]
 //                             （m_shareMode 由 m_versionIndex 透過
 //                               BitmapItem::shareModeOf() 同步）
 //     m_viewMode == Version → 取 getImageAt(m_versionIndex)
@@ -236,9 +241,13 @@ void MainWindow::selectRow()
 
 // ===== 建立 / 重建 Shares 清單（依目前選的版本）=====
 // 文字一律由 BitmapItem 提供（sharePrefix()），這裡不寫死任何模式名稱：
-//   Binary    → Binary_share0 / Binary_share1
-//   C Channel → C_share0 / C_share1
+//   Binary    → Binary_share0 / Binary_share1 / Binary_superimposed
+//   C Channel → C_share0 / C_share1 / C_superimposed
 //   Original  → 清空（不支援 share）
+//
+// 最後一列 <prefix>_superimposed 是「兩張 share 疊起來」的圖（見 BitmapItem::getSuperimposed()），
+// 它沒有自己的產生函式：按 Generate 產生 share 之後，點這一列就會顯示疊圖。
+// 它的 UserRole 存 kSuperimposedIndex，showCurrentImage() 用它分辨「要顯示疊圖」。
 //
 // 可重複呼叫：切換版本時會再叫一次，所以先 clear() 再重建。
 // 建表期間先 blockSignals，理由同 initList()（避免 slot 在清單不完整時就跑）。
@@ -256,6 +265,12 @@ void MainWindow::initShareList()
             row->setData(Qt::UserRole, i);      // 偷存「第幾張 share」
             ui->shareList->addItem(row);
         }
+
+        // 疊圖：兩張 share 疊起來的結果（一樣用 prefix 命名）
+        QListWidgetItem *superimposedRow = new QListWidgetItem(
+            QStringLiteral("%1_superimposed").arg(prefix));
+        superimposedRow->setData(Qt::UserRole, kSuperimposedIndex);
+        ui->shareList->addItem(superimposedRow);
     }
     // 不支援 share → 清單保持空的（Generate 由呼叫端停用）
 
@@ -351,6 +366,7 @@ void MainWindow::generateShares()
                                      .arg(prefix).arg(col).arg(row));
 
     // 生成後直接切到第 0 張 share
+    // （shareList 另外還有 <prefix>_superimposed，點它就會顯示兩張 share 疊起來的結果）
     m_viewMode   = ViewMode::Share;
     m_shareIndex = 0;
     selectRow();                // pictureList 清掉選取（Share 不在 pictureList 裡）
@@ -398,6 +414,14 @@ void MainWindow::showCurrentImage()
         image = m_current->getImageAt(m_versionIndex);
         break;
     case ViewMode::Share: {
+        // 最後一列 <prefix>_superimposed → 兩張 share 疊起來的圖
+        // （由 BitmapItem::getSuperimposed() 算，第一次算完會快取；
+        //   還沒 Generate 時 share 不存在 → 回傳空圖 → 右側空白）
+        if (m_shareIndex == kSuperimposedIndex) {
+            image = m_current->getSuperimposed(m_shareMode);
+            break;
+        }
+
         // 機密圖一次產生全部（已快取），依 m_shareIndex 挑第幾張
         // 注意：這裡要用 m_shareMode（= 目前選的版本），不能寫死 Binary，
         //       否則選了 C Channel 時右側仍會顯示 Binary 的 share。
