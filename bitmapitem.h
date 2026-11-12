@@ -11,6 +11,25 @@ class Progress;     // 進度回報器（見 progress.h）；這裡只用到指�
 
 class BitmapItem;
 
+// ===== 機密分享的來源模式 (share mode) =====
+// 決定 createShares() 要「讀哪張圖」來判斷黑/白，以及「填什麼顏色」：
+//   Binary  : 讀 m_binary，黑/白 (0,0,0) / (255,255,255)
+//   Color8  : 讀 m_color8，黑/白 (0,0,0) / (255,255,255)
+//   Cyan    : 讀 m_cChannel，填青墨 (  0,255,255) / 白
+//   Magenta : 讀 m_mChannel，填洋紅 (255,  0,255) / 白
+//   Yellow  : 讀 m_yChannel，填黃墨 (255,255,  0) / 白
+//
+// 每個模式各自有一份 share 快取，互不影響
+// （見 m_Binary_shares / m_8Color_shares / m_C_shares / m_M_shares / m_Y_shares）。
+enum class ShareMode
+{
+    Binary,
+    Color8,
+    Cyan,
+    Magenta,
+    Yellow,
+};
+
 // ===== 版本目錄 (version catalog) =====
 // 一個「版本」= 畫面上可以顯示的一種影像 + 它的名字。
 //   label    : 給 UI 顯示的文字（pictureList 的列文字）
@@ -92,16 +111,20 @@ public:
     // 改變設定會清掉先前產生的 m_sharings 快取
     void setSSConfig(int n, int k, int ratioRow, int ratioCol);
 
-    // 一次取得全部機密圖 (共 2 張)
+    // 一次取得某個模式的全部機密圖 (共 2 張)
     //
+    //   mode            : 來源模式 (Binary / Color8 / Cyan / Magenta / Yellow)，
+    //                     決定讀哪張圖、填什麼顏色。平常不寫就是 Binary。
     //   progress        : 進度回報器，可傳 nullptr（= 不回報進度）。
     //                     每算完原圖的一列就會呼叫一次 progress->report(已完成列數)，
     //                     total 由本函式透過 progress->setTotal() 設定（= 原圖列數）。
-    //   forceRegenerate : false → m_shares 為空才計算（原本的行為，會用快取）
+    //   forceRegenerate : false → 該模式的 share 快取為空才計算（會用快取）
     //                     true  → 丟掉快取、重新亂數抽樣重算（每次結果都不同）
     //
+    // 每個模式各自快取：取 Cyan 不會動到 Binary 的快取，反之亦然。
     // 尚未載入成功（或參數不合法）時回傳空的 vector（此時不會呼叫 report）。
-    std::vector<QImage> getShares(Progress *progress = nullptr,
+    std::vector<QImage> getShares(ShareMode mode = ShareMode::Binary,
+                                  Progress *progress = nullptr,
                                   bool forceRegenerate = false) const;
 
     // const function 不改物件的東西
@@ -128,9 +151,30 @@ private:
     //      ratioRow (垂直) x ratioCol (水平) 倍
     //   3. 每個原圖像素各自隨機挑一種可能性 a (0 .. m-1)，
     //      白 → 兩張 share 都取 C[a][0]；黑 → share0 取 C[a][0]、share1 取 C[a][1]
+    //
+    // 通用形：同一套演算法，只差在「讀哪張圖判斷黑/白」與「填什麼顏色」：
+    //   mode = Binary  → 讀 getBinary()，qRed(p) <= 127 當黑，黑填 (0,0,0)
+    //   mode = Color8  → 讀 getColor8()，qRed(p) <= 127 當黑，黑填 (0,0,0)
+    //   mode = Cyan    → 讀 getCChannel()，maskCyan()    R == 0 當有墨，填 (0,255,255)
+    //   mode = Magenta → 讀 getMChannel()，maskMagenta() G == 0 當有墨，填 (255,0,255)
+    //   mode = Yellow  → 讀 getYChannel()，maskYellow()  B == 0 當有墨，填 (255,255,0)
+    //
     // 每算完一列呼叫一次 progress->report()（progress 可為 nullptr）
-    // 結果寫入 m_shares (mutable)，故為 const
-    void create2Shares(Progress *progress) const;
+    // 結果寫入對應模式的 shares vector (mutable)，故為 const
+    void createShares(ShareMode mode, Progress *progress) const;
+
+    // --- 各模式的「遮罩」判斷：把一個像素轉成 1 (有墨/黑) 或 0 (白/沒墨) ---
+    // 為什麼要拆成四個小函式，而不是在 createShares() 裡用一個 bool 旗標切換？
+    //   Binary / Color8 是「黑字白底」：黑 = 暗，所以 R <= 127 才算 1。
+    //   C / M / Y 是「彩墨白底」：有墨時該通道是 0、沒墨時是 255，
+    //   所以是「該通道 == 0 才算 1」，方向和 Binary 完全相反。
+    //   各自一個函式後，createShares() 只要用成員函式指標挑一個，
+    //   不用管比較方向，也就不會像 darkIsHigh 那樣寫反。
+    // 只讀傳入的 pixel、不碰成員，故為 const（static 也可，但這裡沿用成員函式指標的形式）
+    int maskBinary(QRgb p) const;      // Binary / Color8：R <= 127 → 1（黑）
+    int maskCyan(QRgb p) const;        // C 色版：R == 0 → 1（有青墨）
+    int maskMagenta(QRgb p) const;     // M 色版：G == 0 → 1（有洋紅墨）
+    int maskYellow(QRgb p) const;      // Y 色版：B == 0 → 1（有黃墨）
 
     // --- 成員變數 ---
     QString m_name;         // 檔名
@@ -157,7 +201,16 @@ private:
     int m_ratioCol = 2;     // 像素擴張量：水平倍率
 
     // mutable 允許在 const 函式裡改
-    mutable std::vector<QImage> m_shares;   // 機密圖 (共 m_n 張)
+    // 每個來源模式各自一份機密圖快取（各共 m_n 張），互不影響
+    //
+    // 命名依原本設計的注解：m_Binary_shares / m_8Color_shares / m_C_shares / m_M_shares / m_Y_shares。
+    // 注：C++ 識別字不能以數字開頭，所以 8Color 寫成 m_8Color_shares 會編譯錯誤，
+    //     因此保留語意但改成 m_color8_shares。
+    mutable std::vector<QImage> m_Binary_shares;
+    mutable std::vector<QImage> m_color8_shares;
+    mutable std::vector<QImage> m_C_shares;
+    mutable std::vector<QImage> m_M_shares;
+    mutable std::vector<QImage> m_Y_shares;
 };
 
 // ===== 編碼矩陣 (encoding matrix) =====

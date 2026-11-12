@@ -213,23 +213,46 @@ QImage BitmapItem::getImageAt(int index) const
 
 // ===== 機密分享 =====
 
-// 機密圖：第一次呼叫才建立並快取 (m_shares 是 mutable)
-// setSSConfig() 改參數時會清空 m_shares → 下次呼叫重算
-// forceRegenerate 為 true 時不看快取，一律重新亂數抽樣重算
-std::vector<QImage> BitmapItem::getShares(Progress *progress, bool forceRegenerate) const
+// 依模式取出對應的 share 快取 vector（五個模式互不影響）
+// 四個 vector 都以引用傳入，回傳其中一個的引用，
+// 把「挑哪一份」的 switch 集中在這裡。
+// 注：這些成員都是 mutable，所以在 const 函式內取得可寫入引用是合法的。
+static std::vector<QImage> &shareCacheOf(std::vector<QImage> &bin,
+                                        std::vector<QImage> &c8,
+                                        std::vector<QImage> &c,
+                                        std::vector<QImage> &m,
+                                        std::vector<QImage> &y,
+                                        ShareMode mode)
 {
+    switch (mode) {
+    case ShareMode::Color8:  return c8;
+    case ShareMode::Cyan:    return c;
+    case ShareMode::Magenta: return m;
+    case ShareMode::Yellow:  return y;
+    case ShareMode::Binary:
+    default:                 return bin;
+    }
+}
+
+std::vector<QImage> BitmapItem::getShares(ShareMode mode, Progress *progress,
+                                          bool forceRegenerate) const
+{
+    // mutable 成員可以在 const 函式裡改，所以取得可寫入的引用
+    std::vector<QImage> &cache = shareCacheOf(m_Binary_shares, m_color8_shares,
+                                              m_C_shares, m_M_shares, m_Y_shares, mode);
+
     if (forceRegenerate) {
-        m_shares.clear();        // 丟掉舊的 → 強制重抽
+        cache.clear();           // 丟掉該模式的舊快取 → 強制重抽
     }
-    if (m_shares.empty()) {
-        create2Shares(progress); // progress 可為 nullptr → 不回報進度
+    if (cache.empty()) {
+        createShares(mode, progress);   // progress 可為 nullptr → 不回報進度
     }
-    return m_shares;
+    return cache;
 }
 
 // 設定參數：只有真的改變時才動作，避免無謂地丟掉快取。
 // 因為機密圖是由這組參數算出來的，所以任何一個參數變了，
-// 先前產生的 m_shares 就必須作廢（清空 → 下次 getShares() 重算）。
+// 先前產生的五份 m_XXX_shares 都必須作廢（清空 → 下次 getShares() 重算）。
 void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
 {
     // 防呆：n 至少要有 2 張才意義上能「分享」；
@@ -250,14 +273,47 @@ void BitmapItem::setSSConfig(int n, int k, int ratioRow, int ratioCol)
     m_ratioRow = ratioRow;
     m_ratioCol = ratioCol;
 
-    // 參數變了 → 舊的機密圖不再對應現在的設定，清掉
-    m_shares.clear();
+    // 參數變了 → 五個模式的機密圖都不再對應現在的設定，全部清掉
+    m_Binary_shares.clear();
+    m_color8_shares.clear();
+    m_C_shares.clear();
+    m_M_shares.clear();
+    m_Y_shares.clear();
 }
 
-void BitmapItem::create2Shares(Progress *progress) const //弄成通用形函式，傳入「模式」參數：Binary, C,M,Y
+// ===== 各模式的遮罩判斷（1 = 有墨/黑，0 = 白/沒墨）=====
+// 每個函式只負責「這個像素算不算 1」，比較方向寫在各函式裡，
+// createShares() 只需依模式挑一個函式指標，不必再管方向。
+//
+// 兩類語意完全不同，所以刻意不共用：
+//   Binary / Color8 : 黑字白底 → 越暗越是墨      → qRed <= 127 → 1
+//   C / M / Y       : 彩墨白底 → 該通道 0 是有墨 → 該通道 == 0 → 1
+//   （注意 C 的有墨是 R = 0，和 Binary 的「R 很小才是黑」剛好反過來，
+//     因為色版的兩個通道固定 255，只有「有墨」時該通道才會變 0）
+
+int BitmapItem::maskBinary(QRgb p) const
+{
+    return (qRed(p) <= 127) ? 1 : 0;      // 灰階近似：R 很暗 → 黑
+}
+
+int BitmapItem::maskCyan(QRgb p) const
+{
+    return (qRed(p) == 0) ? 1 : 0;        // (0,255,255) 青墨 → 有墨
+}
+
+int BitmapItem::maskMagenta(QRgb p) const
+{
+    return (qGreen(p) == 0) ? 1 : 0;      // (255,0,255) 洋紅 → 有墨
+}
+
+int BitmapItem::maskYellow(QRgb p) const
+{
+    return (qBlue(p) == 0) ? 1 : 0;       // (255,255,0) 黃墨 → 有墨
+}
+void BitmapItem::createShares(ShareMode mode, Progress *progress) const
 {
     if (m_original.isNull()) {
-        return;              // 沒有原圖 → 無法產生，m_shares 保持空
+        return;              // 沒有原圖 → 無法產生，該模式的 shares 保持空
     }
 
     // 1. 先建立編碼矩陣 C[a][s][i][j]
@@ -277,8 +333,56 @@ void BitmapItem::create2Shares(Progress *progress) const //弄成通用形函式
         2, QImage(m_width * m_ratioCol, m_height * m_ratioRow,
                   QImage::Format_RGB32));
 
-    const QImage binary = getBinary(); // 二值圖（已快取，沒有就現算）
-    //根據模式改讀取的img
+    // 依模式決定「讀哪張圖」、「用哪個函式判斷有墨/黑」、「有墨要填什麼顏色」
+    //
+    //   mode          source           判斷「1 = 有墨/黑」的函式  填色 (1 要填的顏色)
+    //   Binary        getBinary()      maskBinary()  R <= 127     (0,0,0)     黑
+    //   Color8        getColor8()      maskBinary()  R <= 127     (0,0,0)     黑
+    //   Cyan          getCChannel()    maskCyan()    R == 0       (0,255,255) 青墨
+    //   Magenta       getMChannel()    maskMagenta() G == 0       (255,0,255) 洋紅
+    //   Yellow        getYChannel()    maskYellow()  B == 0       (255,255,0) 黃墨
+    //
+    //   為什麼 Binary 和 C/M/Y 不共用同一套判斷？
+    //     Binary / Color8 是「黑字白底」：黑 = 暗 → R <= 127 當 1。
+    //     C / M / Y  是「彩墨白底」：有墨 → 該通道為 0、其餘通道 255；
+    //                                沒墨 → 整張白 (255,255,255)。
+    //     所以色版是「該通道 == 0 才是有墨」，方向和 Binary 相反
+    //     （C 的有墨是 R=0，不是 R>127），因此各模式用自己的遮罩函式，
+    //     createShares() 不必再管比較方向。
+    QImage (BitmapItem::*getSource)() const   = &BitmapItem::getBinary;
+    int    (BitmapItem::*getMask)(QRgb) const = &BitmapItem::maskBinary;
+    QRgb inkColor = qRgb(0, 0, 0);          // v == 1 要填的顏色（黑 / 青 / 洋紅 / 黃）
+
+    switch (mode) {
+    case ShareMode::Color8:
+        getSource = &BitmapItem::getColor8;                 // 與 Binary 相同判斷
+        getMask   = &BitmapItem::maskBinary;
+        break;
+    case ShareMode::Cyan:
+        getSource = &BitmapItem::getCChannel;
+        getMask   = &BitmapItem::maskCyan;                  // R == 0 → 有墨
+        inkColor  = qRgb(0, 255, 255);                      // 青墨
+        break;
+    case ShareMode::Magenta:
+        getSource = &BitmapItem::getMChannel;
+        getMask   = &BitmapItem::maskMagenta;               // G == 0 → 有墨
+        inkColor  = qRgb(255, 0, 255);                      // 洋紅
+        break;
+    case ShareMode::Yellow:
+        getSource = &BitmapItem::getYChannel;
+        getMask   = &BitmapItem::maskYellow;                // B == 0 → 有墨
+        inkColor  = qRgb(255, 255, 0);                      // 黃墨
+        break;
+    case ShareMode::Binary:
+    default:
+        getSource = &BitmapItem::getBinary;
+        getMask   = &BitmapItem::maskBinary;
+        break;
+    }
+
+    const QImage source = (this->*getSource)();    // 已快取，沒有就現算
+    const QRgb white = qRgb(255, 255, 255);        // v == 0 要填的顏色（白）
+
     QRandomGenerator *rng = QRandomGenerator::global();
 
     // 進度單位 = 原圖列數；total 只在這裡設一次，UI 端不必自己猜
@@ -289,15 +393,8 @@ void BitmapItem::create2Shares(Progress *progress) const //弄成通用形函式
     // 3. 跑原圖每個像素；新圖上以 (ratioRow, ratioCol) 為間隔，填滿對應的一塊
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
-          // 取二值圖該像素：1 = 黑, 0 = 白
-          // 根據模式有不同的標準
-          // binary 照舊
-          // C 取 rgb 的r 大於127 當作黑 
-          // M 取 rgb 的g 大於127 當作黑 
-          // Y 取 rgb 的b 大於127 當作黑
-            const int v = (qRed(binary.pixel(x, y)) <= 127) ? 1 : 0;
-
-          // Qrgb 填色（取好名字）; 所謂填色就是 binary: 黑, c=0,255,255 m=255,0,255 y=255,255,0
+            // 用該模式自己的遮罩函式判斷「1 = 有墨/黑, 0 = 白/沒墨」
+            const int v = (this->*getMask)(source.pixel(x, y));
 
             // 這個像素隨機挑一種可能性 a (0 .. P-1)
             //   P = m! / ((m/2)! (m/2)!)，例如 m=4 → 6 種
@@ -314,8 +411,8 @@ void BitmapItem::create2Shares(Progress *progress) const //弄成通用形函式
                 for (int i = 0; i < m_ratioRow; ++i) {
                     for (int j = 0; j < m_ratioCol; ++j) {
                         const QRgb rgb = C[a][t][i][j]
-                                       ? qRgb(0, 0, 0)       // 1 = 黑 //這裡改成填色
-                                       : qRgb(255, 255, 255); // 0 = 白
+                                       ? inkColor   // 1 = 黑/有墨 → 填模式對應的顏色
+                                       : white;     // 0 = 白/沒墨
                         shares[s].setPixel(x * m_ratioCol + j,
                                            y * m_ratioRow + i, rgb);
                     }
@@ -329,8 +426,9 @@ void BitmapItem::create2Shares(Progress *progress) const //弄成通用形函式
         }
     }
 
-    // 寫入快取 (m_shares 是 mutable)
-    m_shares = std::move(shares);
+    // 寫入對應模式的快取 vector（五個模式互不影響，mutable 成員）
+    shareCacheOf(m_Binary_shares, m_color8_shares,
+                 m_C_shares, m_M_shares, m_Y_shares, mode) = std::move(shares);
 }
 
 void BitmapItem::create8Color() const
@@ -426,7 +524,7 @@ void BitmapItem::createBinary() const
 //   判斷「有墨 / 沒墨」時直接看對應通道是否為 0 即可。
 //
 // 三張色版都是白底 + 單一墨色，可以直接丟進現有的黑白 secret sharing
-// （create2Shares() 再把「有墨」對應成填色、「沒墨」對應成白色）。
+// （createShares() 再把「有墨」對應成填色、「沒墨」對應成白色）。
 
 void BitmapItem::createCChannel() const
 {

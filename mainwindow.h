@@ -79,7 +79,7 @@ private:
     //       pictureList 直接照那張表建立，新增版本時這個檔案不用改。
     enum class ViewMode { Version, Share };
 
-    // 目前固定 2 張 share（與 BitmapItem::create2Shares() 一致）
+    // 目前固定 2 張 share（與 BitmapItem::createShares() 一致）
     static constexpr int kShareCount = 2;
 
     Ui::MainWindow *ui;

@@ -230,7 +230,7 @@ void MainWindow::selectShareRow()
 }
 
 // ===== 依 col / row 編輯格重新產生機密圖 =====
-// 注意：create2Shares() 是同步計算（逐像素），大圖會讓 UI 暫時凍結，
+// 注意：createShares() 是同步計算（逐像素），大圖會讓 UI 暫時凍結，
 //       因此每算完一列就透過 Progress 的 callback 呼叫 processEvents()，
 //       讓進度條有機會重繪（processEvents() 只出現在這裡，不會污染 BitmapItem）。
 void MainWindow::generateShares()
@@ -251,7 +251,7 @@ void MainWindow::generateShares()
     ui->shareProgress->setFormat(tr("Generating… %p%"));
     QCoreApplication::processEvents();      // 讓 0% 先顯示出來
 
-    // 參數變了會清掉舊的 m_shares 快取；forceRegenerate = true 一律重算
+    // 參數變了會清掉五個模式的快取；forceRegenerate = true 一律重算
     m_current->setSSConfig(kShareCount, 1, row, col);
 
     // 進度回報器：GUI 只負責「收到進度要做什麼」，不知道誰在算
@@ -265,7 +265,7 @@ void MainWindow::generateShares()
     });
 
     const std::vector<QImage> shares =
-        m_current->getShares(&progress, /*forceRegenerate=*/true);
+        m_current->getShares(ShareMode::Binary, &progress, /*forceRegenerate=*/true);
 
     ui->generateButton->setEnabled(true);
 

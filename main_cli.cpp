@@ -16,6 +16,7 @@
 //
 // --ss 指定機密分享的像素擴張量，參數順序為 <ratioCol> <ratioRow>（水平，垂直），
 // 預設為 BitmapItem 的預設值 2 x 1（水平 2、垂直 1）。
+// --share-mode 指定 share 的來源模式：binary（預設）/ color8 / c / m / y。
 // --dump-matrix 則只印出編碼矩陣 C[a][s][i][j] 的所有可能性（2D 樣式），不讀圖檔。
 //
 // 用 QCoreApplication：CLI 只要有 QtCore + QtGui，不需要視窗系統。
@@ -80,6 +81,18 @@ void dumpEncodingMatrix(QTextStream &out, int ratioCol, int ratioRow)
         }
         out << "\n";
     }
+}
+
+// 字串 -> ShareMode；不認識就回傳 false（讓 main 印錯誤）
+bool parseShareMode(const QString &text, ShareMode &mode)
+{
+    const QString t = text.trimmed().toLower();
+    if (t == QLatin1String("binary"))  { mode = ShareMode::Binary;  return true; }
+    if (t == QLatin1String("color8"))  { mode = ShareMode::Color8;  return true; }
+    if (t == QLatin1String("c") || t == QLatin1String("cyan"))    { mode = ShareMode::Cyan;    return true; }
+    if (t == QLatin1String("m") || t == QLatin1String("magenta")) { mode = ShareMode::Magenta; return true; }
+    if (t == QLatin1String("y") || t == QLatin1String("yellow"))  { mode = ShareMode::Yellow;  return true; }
+    return false;
 }
 
 } // namespace
@@ -158,6 +171,16 @@ int main(int argc, char *argv[])
         item.setSSConfig(2, 1, ratioRow, ratioCol);
     }
 
+    // --- 可選的 --share-mode <mode>：指定 share 的來源模式 ---
+    ShareMode shareMode = ShareMode::Binary;   // 預設：行為與改動前相同
+    const int smPos = args.indexOf(QLatin1String("--share-mode"));
+    if (smPos >= 0) {
+        if (smPos + 1 >= args.size() || !parseShareMode(args.at(smPos + 1), shareMode)) {
+            err << "Error: --share-mode 只接受 binary / color8 / c / m / y\n";
+            return 2;
+        }
+    }
+
     out << "Loaded: " << item.getName() << "\n"
         << "Path:   " << item.getFilePath() << "\n"
         << "Size:   " << item.getWidth() << "x" << item.getHeight() << "\n";
@@ -168,7 +191,7 @@ int main(int argc, char *argv[])
         dir = QDir::currentPath();
 
     // 機密分享（2 張）：只計算一次，兩張一起輸出
-    const std::vector<QImage> shares = item.getShares();
+    const std::vector<QImage> shares = item.getShares(shareMode);
 
     const struct {
         const char *fileName;
