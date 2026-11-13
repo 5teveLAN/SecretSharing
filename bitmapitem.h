@@ -233,10 +233,11 @@ private:
     //   （2^3 = 8 種 R/G/B 組合）；疊起來（逐通道取 min = 「or」）則
     //   分別還原 a / b / c，合起來就是 SecretN (a,b,c)。
     //
-    // 前提（很重要）：C / M / Y 三個模式必須「一次算完、落在同一組座標上」。
+    // 前提（很重要）：C / M / Y 三個模式必須「落在同一組座標、同一尺寸」。
     //   每個色版各自分享自己那個通道的值（C←a、M←b、Y←c），三個通道互不排斥；
-    //   但三張 share 必須一起產生，否則疊圖時 C/M/Y 三份樣式對不起來、
-    //   就還原不出 SecretN。所以三色版由 createCMYKShares() 一次算完。
+    //   三張 share 由 createCMYKShares() 同一趟掃描產生，保證座標與尺寸一致。
+    //   但「同一趟掃描」不等於「共用隨機數」：每個色版、每個像素各抽各的
+    //   （aC / aM / aY），否則三色版花紋會逐格重合、等於共用同一組隨機位元。
     //
     // 只讀 C/M/Y 的 share、寫入 mutable 的 m_color8_shares，故為 const
     void createColor8Shares(Progress *progress) const;
@@ -247,7 +248,8 @@ private:
     // 只讀 share、寫入 mutable 的 m_color8_superimposed，故為 const
     void createColor8Superimposed() const;
 
-    // 一次產生 C / M / Y 三張色版的 share（一起算、落在同一組座標上）
+    // 同一趟掃描產生 C / M / Y 三張色版的 share（共用座標與尺寸、共用一次進度回報），
+    // 但「每個色版各自抽隨機數」（aC / aM / aY），三張花紋不會重合。
     //   createShares(Cyan / Magenta / Yellow) 只取其中一份，
     //   createShares(Color8) 則三份都拿來合併。
     // 寫入 m_C_shares / m_M_shares / m_Y_shares（mutable），故為 const

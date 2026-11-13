@@ -438,14 +438,15 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
         return;
     }
 
-    // ===== C / M / Y：三色版一起算，落在同一組座標上 =====
-    // 為什麼要一起算？
-    //   Color8 的 share 是由這三張合併而來，三張必須共用同一組編碼矩陣與座標，
-    //   否則 C / M / Y 三份樣式對不起來，疊圖時就還原不出 SecretN。
-    //   交給 createCMYKShares() 一次算完三份，只取這次要的那一份。
+    // ===== C / M / Y：同一趟迴圈算完，但每個色版各自抽隨機數 =====
+    // 為什麼放在一起算？
+    //   8Color 的 share 是由這三張合併而來，三張必須落在同一組座標上（尺寸相同）。
+    //   一起算只是共用一次掃描與一次進度回報，不代表共用隨機數：
+    //   createCMYKShares() 內每個色版都各自抽 aC / aM / aY（三色版互不重合）。
+    //   只取這次要的那一份。
     if (mode == ShareMode::Cyan || mode == ShareMode::Magenta
         || mode == ShareMode::Yellow) {
-        createCMYKShares(progress);   // 一次算完 C / M / Y 三份
+        createCMYKShares(progress);   // 一次算完 C / M / Y 三份（各有自己的亂數）
         return;                       // 三份都已寫進各自的快取，呼叫端自己挑要的那份
     }
 
@@ -472,7 +473,7 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
     //   為什麼只有 Binary 走這裡？
     //     Binary 是「黑字白底」：黑 = 暗 → R <= 127 當 1。
     //     C / M / Y 是「彩墨白底」：有墨 → 該通道為 0、其餘通道 255，
-    //     方向相反，而且三色版還得共用同一組隨機位元（見 createCMYKShares()），
+    //     方向相反，而且要三色版一起掃描、各自抽隨機數（見 createCMYKShares()），
     //     所以各自走各自的路徑。
     //     Color8 更是完全不同：它是 C/M/Y 的合併（見 createColor8Shares()）。
     const QImage source = getBinary();             // 已快取，沒有就現算
@@ -526,12 +527,21 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
     m_Binary_shares = std::move(shares);
 }
 
-// ===== C / M / Y 三色版（一次算完、落在同一組座標上）=====
-// 為什麼三個色版要一起算？
-//   8Color 的 share 就是「C share + M share + Y share」三張合併起來。
-//   三張必須落在同一組座標上、用同一組編碼矩陣，
-//   合併後的 8 色圖在疊圖時（逐通道取 min = 「or」）才能還原 SecretN。
-//   若三張各自跑一次、連矩陣都不同組，疊圖就會對不起來。
+// ===== C / M / Y 三色版（同一趟迴圈算完，但各色版「各自抽隨機數」）=====
+// 為什麼三個色版放在同一趟迴圈算？
+//   8Color 的 share 就是「C share + M share + Y share」三張合併起來，
+//   三張必須落在同一組座標上、尺寸相同，合併才有意義。
+//   同一趟迴圈只是為了「共用一次掃描 + 一次進度回報」，
+//   不代表三個色版共用隨機數（見下面的 aC / aM / aY）。
+//
+// 為什麼隨機數必須分開？
+//   若三色版共用同一個亂數 a，三張 share 的花紋會逐格完全重合，
+//   任一張 share 上就同時看得到 C、M、Y 三個色版的位置，
+//   等於三個色版用了同一組隨機位元 → 失去機密分享的獨立性。
+//   因此每個色版、每個原圖像素都各自抽一次 bounded(P)：
+//     aC 給 C、aM 給 M、aY 給 Y，彼此無關。
+//   每個色版內部仍是「兩張 share 在同一格互補」（C[a][0] / C[a][1]），
+//   所以單色版疊圖仍完全正確，8 Color 的合成也不受影響。
 //
 // 每張色版都只填「該通道」，負責 SecretN 的其中一個維度：
 //   C share = (0,255,255) 青墨 / (255,255,255) 白   ← R 通道（a）
@@ -539,7 +549,8 @@ void BitmapItem::createShares(ShareMode mode, Progress *progress) const
 //   Y share = (255,255,0) 黃墨 / (255,255,255) 白   ← B 通道（c）
 //
 // 也就是說：這是「三個通道各自做一次 (2,2) 黑白分享」，
-//   疊圖取 min 後 R 還原 a、G 還原 b、B 還原 c → 合起來就是 SecretN (a,b,c)。
+//   疊圖時每格只會剩下「某一張 share 有墨的那一半」→ 該色版的墨色，
+//   遠看就還原出該色版的 SecretN。
 // 三個維度互相獨立，所以同一個位置可以三個通道同時有墨（疊圖就是深色）。
 void BitmapItem::createCMYKShares(Progress *progress) const
 {
@@ -586,8 +597,8 @@ void BitmapItem::createCMYKShares(Progress *progress) const
     //      C share 的 R ← maskCyan()    （a 這個維度）
     //      M share 的 G ← maskMagenta() （b 這個維度）
     //      Y share 的 B ← maskYellow()  （c 這個維度）
-    //    疊圖時逐通道取 min（墨 0、白 255 → 也就是 or），三個通道各自獨立還原，
-    //    合起來就是 SecretN (a,b,c)。
+    //    三個色版各自抽隨機數（aC / aM / aY），所以三張的花紋互不相關；
+    //    單看 C 的 share，無法推出 M / Y 的圖案。
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
             // 這個原圖像素在三個色版各自「有沒有墨」：
@@ -599,25 +610,42 @@ void BitmapItem::createCMYKShares(Progress *progress) const
             const int vM = maskMagenta(mSource.pixel(x, y));
             const int vY = maskYellow(ySource.pixel(x, y));
 
-            // 這個像素隨機挑一種可能性 a（0 .. P-1），三色版共用同一組
-            const int a = rng->bounded(P);
+            // 這個像素「每個色版各自」隨機挑一種可能性 a（0 .. P-1）
+            //
+            // 為什麼不是三色版共用一個 a？
+            //   共用一個 a 的話，三張 share 的花紋會「逐格完全重合」，
+            //   也就是任一張 share 上都能同時看到 C、M、Y 三種圖案，
+            //   等於三個色版用了同一組隨機數（失去機密分享的獨立性）。
+            //   所以這裡各抽各的：aC / aM / aY 互相獨立，
+            //   三色版的花紋不再同步，單看任一張 share 也拆不出另一個色版的圖案。
+            //
+            // 為什麼這樣 8 Color 還是能還原？
+            //   8 Color 疊圖是「每格只留下一種色版的顏色」（見 createColor8Superimposed()），
+            //   不是「三個通道各自還原 a/b/c」；
+            //   每格留下哪個色版，取決於該格三個色版各自抽到什麼，
+            //   三個色版互相獨立反而正是 8 色圖要的機率分佈。
+            const int aC = rng->bounded(P);
+            const int aM = rng->bounded(P);
+            const int aY = rng->bounded(P);
 
             // 填滿這塊 ratioRow x ratioCol 的格子
             for (int s = 0; s < 2; ++s) {
                 // 規則和 Binary 完全一樣：
                 //   v = 0（白/沒墨）→ 兩張 share 都取 C[a][0]
                 //   v = 1（有墨）   → share0 取 C[a][0]、share1 取 C[a][1]（反轉）
+                // tX 是「這個色版在這張 share 上要用哪一個 bit 版本」：
+                //   tC 用在 C 的 C[aC]，tM 用在 M 的 C[aM]，tY 用在 Y 的 C[aY]
                 const int tC = vC ? s : 0;
                 const int tM = vM ? s : 0;
                 const int tY = vY ? s : 0;
 
                 for (int i = 0; i < m_ratioRow; ++i) {
                     for (int j = 0; j < m_ratioCol; ++j) {
-                        // 每個色版各自看自己那一組 C[a][t][i][j]：
+                        // 每個色版各自看「自己抽到的那一組」C[a][t][i][j]：
                         //   1 = 有墨 → 填該色版的墨色；0 = 白
-                        const QRgb crgb = C[a][tC][i][j] ? cInk : white;   // C：R = 0
-                        const QRgb mrgb = C[a][tM][i][j] ? mInk : white;   // M：G = 0
-                        const QRgb yrgb = C[a][tY][i][j] ? yInk : white;   // Y：B = 0
+                        const QRgb crgb = C[aC][tC][i][j] ? cInk : white;   // C：R = 0
+                        const QRgb mrgb = C[aM][tM][i][j] ? mInk : white;   // M：G = 0
+                        const QRgb yrgb = C[aY][tY][i][j] ? yInk : white;   // Y：B = 0
 
                         const int px = x * m_ratioCol + j;
                         const int py = y * m_ratioRow + i;
@@ -647,8 +675,9 @@ void BitmapItem::createCMYKShares(Progress *progress) const
 //   share[s](px,py) = ( C_share[s] 的 R, M_share[s] 的 G, Y_share[s] 的 B )
 // 也就是 (a, b, c) 三個通道各自拿一張色版的結果，合起來就是 8 色圖。
 //
-// 疊圖時逐通道取 min（墨 0、白 255 → 「or」），三個通道各自還原出 a / b / c，
-// 合起來就回到 SecretN (a,b,c)。
+// 疊圖時逐通道取 min（墨 0、白 255 → 「or」）。8 色圖每一格只可能是
+// 「某一個色版有墨（例如只有 C → (0,255,255)）」或「三個都有墨 + 白」，
+// 而不是三個色版各自獨立還原 → 見 createColor8Superimposed()。
 void BitmapItem::createColor8Shares(Progress *progress) const
 {
     if (m_original.isNull()) {
@@ -656,7 +685,8 @@ void BitmapItem::createColor8Shares(Progress *progress) const
     }
 
     // 1. 確保 C / M / Y 三色版的 share 都已存在
-    //    （沒有就現算；三張共用同一組隨機位元，見 createCMYKShares()）
+    //    （沒有就現算；三張同一次掃描產生，但每個色版各自抽隨機數，
+    //      見 createCMYKShares()）
     const std::vector<QImage> cShares = getShares(ShareMode::Cyan, progress);
     const std::vector<QImage> mShares = getShares(ShareMode::Magenta, progress);
     const std::vector<QImage> yShares = getShares(ShareMode::Yellow, progress);
@@ -665,6 +695,19 @@ void BitmapItem::createColor8Shares(Progress *progress) const
     }
 
     // 2. 逐像素合併：C 取 R、M 取 G、Y 取 B（三張尺寸相同，以 C 為準）
+    //
+    // 為什麼 C / M / Y 三色版可以各自抽隨機數，合併後的 8 色圖仍然正確？
+    //   8 色圖在疊圖時不是「三個通道各自還原 a/b/c」，
+    //   而是「每一格最後只留下一種顏色」（見 createColor8Superimposed()）。
+    //   格子裡留下哪一種顏色，取決於「哪一個色版剛好抽到『互補』的那一組」，
+    //   機率由三個色版各自的墨量決定 —— 那正是 8 色圖要的比例。
+    //   因此三張 share 的花紋彼此獨立並不影響 8 色圖的統計特性。
+    //
+    // 為什麼一定要「三張一起算」？
+    //   若只重抽其中一個色版（例如只按 C 的 Generate），
+    //   另外兩個色版還是舊的那一批 → 合成出來的 8 色 share 會混到舊位元。
+    //   getShares(Color8) 已把「重抽任一色版就作廢 8Color」寫進連動清表，
+    //   所以這裡可以放心直接取三份快取。
     std::vector<QImage> shares(
         2, QImage(cShares[0].width(), cShares[0].height(), QImage::Format_RGB32));
 
